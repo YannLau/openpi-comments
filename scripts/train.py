@@ -377,7 +377,7 @@ def main(config: _config.TrainConfig):
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
     
     
-    """
+    """ 分片
 ## JAX 设备网格（Mesh）与 FSDP 分片方案
 
 ### 一句话总结
@@ -592,7 +592,7 @@ if len(array.shape) < 2:
     if resuming:
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
 
-    # ---- 9. JIT 编译训练步骤 ----
+    # ---- 9. JIT 编译训练步骤 ----                                JIT 编译的是"数值计算图"（computational graph），不是"Python 函数"（Python function）。
     # jax.jit 将 train_step 函数编译为高效的 XLA 计算图
     # in_shardings 指定输入的分片方案，out_shardings 指定输出分片方案
     # donate_argnums=(1,) 表示 state 参数的内存可被复用（in-place 更新），节省显存
