@@ -38,6 +38,7 @@ dependencies = [
     "transformers==4.53.2",
     "rich>=14.0.0",
     "polars>=1.30.0",
+    "jupyter>=1.1.1",
 ]
 
 
@@ -115,6 +116,9 @@ select = [
     "W",
 ]
 ignore = [
+    "RUF001",
+    "RUF002",
+    "RUF003",
     "F722",   # Conflicts with array typing.
     "T201",   # We use print statements.
     "PD008",  # Lots of false positives.
