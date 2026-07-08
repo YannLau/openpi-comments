@@ -52,6 +52,8 @@ import flax.nnx as nnx
 from typing_extensions import override
 import tyro  # 一个强大的命令行参数解析库，支持 dataclass
 
+import openpi.models.dummy_model as dummy_model  # 添加自己自定义的测试模型
+
 import openpi.models.model as _model
 import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_fast as pi0_fast
@@ -98,8 +100,8 @@ class AssetsConfig:
             asset_id="trossen",
         )
     """
-    
-    '''
+
+    """
 ## 归一化是什么？
 
 归一化（Normalization）就是**把不同尺度的数据映射到一个统一的范围内**。
@@ -201,7 +203,7 @@ AssetsConfig(
 
 归一化是**让不同物理量在数值尺度上公平竞争**的手段。它的统计量需要**扫描整个数据集**才能得到，所以是一次性预计算、保存为文件的"资产"。
 `AssetsConfig` 就是管理这些预计算统计量的配置——**告诉训练/推理代码去哪里找这些文件**。
-    '''
+    """
 
     # 资产目录路径。如果未提供，则使用配置的默认 assets_base_dir。
     # 当需要从不同的检查点（如基础模型检查点）加载资产时设置此值。
@@ -368,6 +370,17 @@ class ModelTransformFactory(GroupFactory):
                         )
                     ],
                 )
+            case _model.ModelType.DUMMY:
+                return _transforms.Group(
+                    inputs=[
+                        _transforms.InjectDefaultPrompt(self.default_prompt),
+                        _transforms.ResizeImages(224, 224),
+                        _transforms.TokenizePrompt(
+                            _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+                        ),
+                        _transforms.PadStatesAndActions(model_config.action_dim),
+                    ],
+                )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -431,9 +444,7 @@ class DataConfigFactory(abc.ABC):
             use_quantile_norm=model_config.model_type != ModelType.PI0,
         )
 
-    def _load_norm_stats(
-        self, assets_dir: epath.Path, asset_id: str | None
-    ) -> dict[str, _transforms.NormStats] | None:
+    def _load_norm_stats(self, assets_dir: epath.Path, asset_id: str | None) -> dict[str, _transforms.NormStats] | None:
         """从资产目录中加载归一化统计量。
 
         归一化统计量是训练前预计算的（通过 scripts/compute_norm_stats.py），
@@ -500,6 +511,79 @@ class SimpleDataConfig(DataConfigFactory):
 
     # 模型变换工厂（默认使用 ModelTransformFactory）
     model_transforms: tyro.conf.Suppress[GroupFactory] = dataclasses.field(default_factory=ModelTransformFactory)
+    """
+    这两行定义的是 **`SimpleDataConfig`** 的两个字段，用于配置数据变换流水线的第2层和第3层。拆开来看：
+---
+
+## 类型拆解
+
+### `tyro.conf.Suppress[GroupFactory]`
+
+- **`GroupFactory`** —— 一个协议（接口），定义了一个可调用对象：`(model_config) -> Group`。它接受模型配置，返回一个变换组。
+- **`tyro.conf.Suppress[...]`** —— 告诉 tyro（这个项目的 CLI 参数解析库）：这个字段不要在命令行参数中暴露。用户无法通过命令行覆盖它，只能通过代码修改。
+
+所以这个字段的类型是"一个符合 `GroupFactory` 协议的工厂对象"。
+
+### `dataclasses.field(default_factory=...)`
+
+Python dataclass 的标准写法：指定这个字段的默认值由一个工厂函数创建，而不是一个字面值。
+
+---
+
+## 具体含义
+
+| 字段               | `default_factory`       | 含义                                                                                                                                    |
+| ------------------ | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `data_transforms`  | `GroupFactory`          | **默认不添加任何数据变换**。GroupFactory 是一个协议（空的抽象），直接用它做 factory 会返回一个空的 `Group()`。                          |
+| `model_transforms` | `ModelTransformFactory` | **默认使用标准的模型变换**。`ModelTransformFactory` 会根据模型类型（π₀、π₀-FAST、π₀.₅）自动创建对应的变换：图像缩放、分词、维度填充等。 |
+
+---
+
+## 数据流
+
+当调用 `SimpleDataConfig.create()` 时（第 516-522 行）：
+
+```python
+def create(self, assets_dirs, model_config):
+    return dataclasses.replace(
+        self.create_base_config(assets_dirs, model_config),
+        data_transforms=self.data_transforms(model_config),   # ← 这里调用了工厂
+        model_transforms=self.model_transforms(model_config), # ← 这里调用了工厂
+    )
+```
+
+它会调用：
+1. `self.data_transforms(model_config)` —— 调用 `GroupFactory` 实例，返回空的 `Group()`
+2. `self.model_transforms(model_config)` —— 调用 `ModelTransformFactory` 实例，根据模型自动生成变换
+
+---
+
+## 对比两种工厂
+
+```python
+class GroupFactory(Protocol):
+    """协议：输入 model_config，输出 Group"""
+    def __call__(self, model_config) -> Group: ...
+
+@dataclasses.dataclass(frozen=True)
+class ModelTransformFactory(GroupFactory):
+    """具体实现：为 π₀/π₀-FAST/π₀.₅ 创建模型变换"""
+    default_prompt: str = ""
+
+    def __call__(self, model_config) -> Group:
+        # 根据 model_config.model_type 创建不同的变换组
+        ...
+```
+
+- **`GroupFactory`** 只是一个空壳协议——你完全可以自己写一个新的类实现它，传入自定义的变换逻辑
+- **`ModelTransformFactory`** 是框架自带的默认实现，覆盖了标准模型的常用变换
+
+---
+
+## 一句话总结
+
+这两个字段的设计意图是：**当你继承 `SimpleDataConfig` 或构建新数据集配置时，允许你替换数据/模型变换的生成逻辑**。默认的 `data_transforms` 什么都不做，默认的 `model_transforms` 自动适配标准模型——你可以传入自定义的 `GroupFactory` 实现来改变任一层的变换行为。
+    """
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -962,6 +1046,7 @@ _CONFIGS = [
     # 它们不从数据集加载数据，而是等待策略服务器传入实时观测数据。
     # 使用 SimpleDataConfig 的变体（没有 repo_id），意味着不会加载训练数据。
     #
+    #  
     TrainConfig(
         name="pi0_aloha",
         model=pi0_config.Pi0Config(),
@@ -997,7 +1082,6 @@ _CONFIGS = [
         ),
         policy_metadata={"reset_pose": [0, -1.5, 1.5, 0, 0, 0]},
     ),
-
     # =========================================================
     #  DROID 推理配置（Inference DROID configs）
     # =========================================================
@@ -1043,7 +1127,6 @@ _CONFIGS = [
             ),
         ),
     ),
-
     # =========================================================
     #  LIBERO 微调配置（Fine-tuning Libero configs）
     # =========================================================
@@ -1151,7 +1234,6 @@ _CONFIGS = [
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
     ),
-
     # =========================================================
     #  ALOHA 微调配置（Fine-tuning Aloha configs）
     # =========================================================
@@ -1218,7 +1300,6 @@ _CONFIGS = [
         num_train_steps=20_000,
         batch_size=64,
     ),
-
     # =========================================================
     #  DROID 微调配置（Fine-tuning DROID configs）
     # =========================================================
@@ -1303,7 +1384,6 @@ _CONFIGS = [
         num_train_steps=20_000,
         batch_size=32,
     ),
-
     # =========================================================
     #  ALOHA 仿真配置（ALOHA Sim configs）
     # =========================================================
@@ -1319,7 +1399,6 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=20_000,
     ),
-
     # =========================================================
     #  调试配置（Debugging configs）
     # =========================================================
@@ -1363,11 +1442,178 @@ _CONFIGS = [
         exp_name="debug_pi05",
         wandb_enabled=False,
     ),
-
+    TrainConfig(
+        name="dummy_debug",
+        model=dummy_model.DummyModelConfig(),
+        data=FakeDataConfig(),
+        weight_loader=weight_loaders.NoOpWeightLoader(),  # 不加载任何预训练权重
+        batch_size=2,
+        num_train_steps=10,
+        log_interval=1,
+        save_interval=5,
+        overwrite=True,
+        exp_name="dummy_test",
+        wandb_enabled=False,
+    ),
     # RoboArena & PolaRiS 配置（其他平台的配置，单独文件中定义）
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
 ]
+
+"""  使用 SimpleDataConfig 的变体（没有 repo_id），意味着不会加载训练数据。  pi0_droid配置使用了SimpleDataConfig，不加载训练数据，那么这个配置还有什么用呢？     
+    
+    答案就在注释里——**Inference DROID configs**（第 1085 行）。这几个配置的用途是 **推理（inference / serving）**，不是训练。
+
+    ---
+
+    ## 没有训练数据，有什么用？
+
+    这类配置专门用在 `scripts/serve_policy.py` 等推理场景中，例如：
+
+    ```bash
+    uv run scripts/serve_policy.py policy:checkpoint \
+        --policy.config=pi0_droid \
+        --policy.dir=checkpoints/pi0_droid/xxx/20000
+    ```
+
+    它的作用：
+
+    ### 1. 定义推理时的输入/输出变换
+
+    虽然不加载训练数据，但 **机器人推理时也需要数据变换**：
+
+    ```python
+    data_transforms=lambda model: Group(
+        inputs=[droid_policy.DroidInputs(model_type=ModelType.PI0)],   # 将原始传感器数据转为 Observation
+        outputs=[droid_policy.DroidOutputs()],                           # 将模型输出转为机器人指令
+    ),
+    ```
+
+    DroidInputs 负责把摄像头图像、关节状态等原始传感器数据转换成模型能吃的 `Observation` 格式；DroidOutputs 负责把模型输出的动作反归一化、转换成机器人可执行的指令。
+
+    ### 2. 加载归一化统计量
+
+    ```python
+    assets=AssetsConfig(asset_id="droid"),
+    ```
+
+    推理时需要加载预计算的归一化统计量（`norm_stats`）来做 **反归一化**——模型输出的是归一化后的动作，要转回真实值。
+
+    ### 3. 定义模型结构
+
+    ```python
+    model=pi0_config.Pi0Config(action_horizon=10),
+    ```
+
+    告诉 serving 脚本：用什么模型架构加载检查点。
+
+    ---
+
+    ## 对比：训练配置 vs 推理配置
+
+    |            | 训练配置（如 `pi0_libero`） | 推理配置（如 `pi0_droid`）           |
+    | ---------- | --------------------------- | ------------------------------------ |
+    | `repo_id`  | 有 → 用于加载训练数据       | 无 → 不加载训练数据                  |
+    | 数据变换   | 在数据集样本上做预处理      | 在实时传感器输入上做预处理           |
+    | 用途       | `scripts/train.py`          | `scripts/serve_policy.py`            |
+    | norm_stats | 来自数据集或预计算          | 从 `AssetsConfig` 加载，用于反归一化 |
+
+    ---
+
+    ## 总结
+
+    `pi0_droid` 这类配置本质上是一个 **模型加载和推理的标准模板**——告诉框架：
+    - 用什么模型结构加载检查点
+    - 从哪加载归一化统计量
+    - 生产环境下的输入/输出格式是什么
+
+    它不训练，但它定义了 **训练好的模型怎么在机器人上跑起来**。这是开环推理（open-loop inference）和策略部署（policy serving）时必不可少的配置。
+"""
+
+"""
+## `repo_id` 是什么？
+
+`repo_id` 是 **Hugging Face LeRobot 数据集的仓库 ID**，格式为 `组织名/数据集名`，比如：
+
+- `"physical-intelligence/libero"`
+- `"lerobot/aloha_sim_transfer_cube_human"`
+- `"physical-intelligence/aloha_pen_uncap_diverse"`
+
+它告诉框架**去哪里下载真实的训练数据**。
+
+---
+
+## 为什么没有 `repo_id` 就不加载真实数据？
+
+直接从数据加载器追一下调用链：
+
+### 训练时
+
+`scripts/train.py` → `create_data_loader()`（第 514 行）→ `create_torch_dataset()`（第 202 行）
+
+```python
+# data_loader.py 第 219-221 行
+repo_id = data_config.repo_id
+if repo_id is None:
+    raise ValueError("未设置数据集 repo_id。无法创建数据集。")
+```
+
+**`repo_id` 为 `None` 时直接报错**。训练脚本根本跑不下去。
+
+### `repo_id` 的三个合法值
+
+| `repo_id`                                      | 行为                                           |
+| ---------------------------------------------- | ---------------------------------------------- |
+| `None`                                         | 抛 ValueError，无法创建数据集                  |
+| `"fake"`                                       | 返回 `FakeDataset`，生成随机假数据（用于调试） |
+| 真实 ID（如 `"physical-intelligence/libero"`） | 从 Hugging Face 下载并加载真实 LeRobot 数据集  |
+
+注意 `FakeDataConfig` 的实现（第 489 行）：
+
+```python
+class FakeDataConfig(DataConfigFactory):
+    repo_id: str = "fake"           # ← 硬编码为 "fake"
+
+    def create(self, assets_dirs, model_config):
+        return DataConfig(repo_id=self.repo_id)  # 返回一个只有 repo_id="fake" 的极简配置
+```
+
+### 为什么推理配置不需要 `repo_id`
+
+因为 **推理根本不走数据加载器**。看推理路径：
+
+`scripts/serve_policy.py` → 只用了 `config.data.create()` 来获取**变换流水线**（`data_transforms` 和 `model_transforms`），从来不会调用 `create_torch_dataset()`。
+
+推理配置只需要三样东西：
+
+1. **模型架构**（`model`）—— 加载检查点
+2. **输入/输出变换**（`data_transforms`）—— 把实时传感器数据转成模型输入
+3. **归一化统计量**（`assets`）—— 反归一化模型输出的动作
+
+这些都不需要 `repo_id`。
+
+---
+
+## 总结
+
+```python
+# SimpleDataConfig 的 create() 方法会调用 create_base_config()
+# 而 create_base_config() 将 repo_id 传给 DataConfig：
+
+repo_id = self.repo_id if self.repo_id is not tyro.MISSING else None
+asset_id = self.assets.asset_id or repo_id
+return DataConfig(
+    repo_id=repo_id,       # None → 训练时会崩
+    ...
+)
+```
+
+- **`repo_id` 之于训练，相当于"数据源地址"**——告诉框架从 Hugging Face 的哪个仓库下载数据
+- 推理配置里 `repo_id` 为 `None` 是**刻意为之**：因为推理用的数据来自真实的机器人传感器，不是从 Hugging Face 读的
+- 如果试图用这样的配置训练，`create_torch_dataset()` 第一行就会抛出 `ValueError`，防止跑出"数据为空"的无声错误
+"""
+
+    
 
 # 检查所有配置的名称是否唯一
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
