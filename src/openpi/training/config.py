@@ -562,12 +562,12 @@ def create(self, assets_dirs, model_config):
 
 ```python
 class GroupFactory(Protocol):
-    """协议：输入 model_config，输出 Group"""
+    协议：输入 model_config，输出 Group
     def __call__(self, model_config) -> Group: ...
 
 @dataclasses.dataclass(frozen=True)
 class ModelTransformFactory(GroupFactory):
-    """具体实现：为 π₀/π₀-FAST/π₀.₅ 创建模型变换"""
+    具体实现：为 π₀/π₀-FAST/π₀.₅ 创建模型变换
     default_prompt: str = ""
 
     def __call__(self, model_config) -> Group:
@@ -1046,7 +1046,7 @@ _CONFIGS = [
     # 它们不从数据集加载数据，而是等待策略服务器传入实时观测数据。
     # 使用 SimpleDataConfig 的变体（没有 repo_id），意味着不会加载训练数据。
     #
-    #  
+    #
     TrainConfig(
         name="pi0_aloha",
         model=pi0_config.Pi0Config(),
@@ -1613,7 +1613,6 @@ return DataConfig(
 - 如果试图用这样的配置训练，`create_torch_dataset()` 第一行就会抛出 `ValueError`，防止跑出"数据为空"的无声错误
 """
 
-    
 
 # 检查所有配置的名称是否唯一
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
