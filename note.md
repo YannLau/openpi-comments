@@ -523,3 +523,93 @@ class FakeDataset(Dataset):  # ← 名义上也继承了
 
 **所以这里确实行得通**——Python 的 `Protocol` 不要求返回的对象有继承关系，只要求它有正确的方法签名。这是 Java 不具备的特性。
 """
+
+
+
+
+
+
+
+# pi0.5模型训练时用的数据集只是一个机器人平台的吗？如果不是，如何处理每种机器人不同的action_dim?                                                             
+  Thought for 4s (ctrl+o to expand)
+
+● Explore(Research pi0.5 training data handling)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+  Thought for 40s, searched for 5 patterns, read 5 files (ctrl+o to expand)
+
+● Now I have all the information needed. Let me give you a comprehensive answer.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● 答案
+
+  两个层面的回答：预训练 vs 微调
+
+  在这个开源仓库里，每个 pi0.5 训练配置都只针对一个机器人平台。
+  没有"多平台混合训练"的配置。
+
+  ┌──────────────────────────┬────────┬─────────────────────────┬────────────┐
+  │          配置名          │  平台  │       数据加载器        │ action_dim │
+  ├──────────────────────────┼────────┼─────────────────────────┼────────────┤
+  │ pi05_aloha               │ ALOHA  │ LeRobotAlohaDataConfig  │ 32 (默认)  │
+  │                          │ (双臂) │                         │            │
+  ├──────────────────────────┼────────┼─────────────────────────┼────────────┤
+  │ pi05_droid               │ DROID  │ SimpleDataConfig        │ 32 (默认)  │
+  ├──────────────────────────┼────────┼─────────────────────────┼────────────┤
+  │                          │ LIBERO │                         │            │
+  │ pi05_libero              │        │ LeRobotLiberoDataConfig │ 32 (默认)  │
+  │                          │ (单臂) │                         │            │
+  ├──────────────────────────┼────────┼─────────────────────────┼────────────┤
+  │ pi05_aloha_pen_uncap     │ ALOHA  │ LeRobotAlohaDataConfig  │ 32 (默认)  │
+  ├──────────────────────────┼────────┼─────────────────────────┼────────────┤
+  │ pi05_full_droid_finetune │ DROID  │ RLDSDroidDataConfig     │ 32         │
+  ├──────────────────────────┼────────┼─────────────────────────┼────────────┤
+  │ pi05_droid_finetune      │ DROID  │ RLDSDroidDataConfig     │ 32         │
+  └──────────────────────────┴────────┴─────────────────────────┴────────────┘
+
+  注意 pi05 的模型配置都不显式指定 action_dim，全部用的是 Pi0Config 默认值
+  32。而对照 pi0_fast_libero 显式写了 action_dim=7。
+
+  真正的多平台预训练（pi05_base）不在此仓库中——那是 Physical Intelligence
+  内部用海量多平台数据训练后，把最终的 base checkpoint 上传到 GCS，让用户从
+  gs://openpi-assets/checkpoints/pi05_base/params 加载进行微调。
+
+  ---
+  不同 action_dim 的处理机制：PadStatesAndActions
+
+  核心代码在 src/openpi/transforms.py:781-801：
+
+  class PadStatesAndActions(DataTransformFn):
+      """将状态和动作的维度扩展到模型的期望维度（32维）"""
+      model_action_dim: int  # 模型期望的动作维度
+
+      def __call__(self, data: DataDict) -> DataDict:
+          data["state"] = pad_to_dim(data["state"], self.model_action_dim,
+  axis=-1)
+          if "actions" in data:
+              data["actions"] = pad_to_dim(data["actions"],
+  self.model_action_dim, axis=-1)
+          return data
+
+  过程是这样的：
+
+  LIBERO 机器人实际动作:  [关节1, 关节2, ..., 关节7]           → 7维
+  经过 PadStatesAndActions(32):  [j1, j2, ..., j7, 0, 0, ..., 0]  → 32维
+  (后面填0)
+
+  然后这个 32 维的动作进入模型，模型输出也是 32 维。损失函数
+  compute_loss()（pi0.py:760）计算 MSE：
+
+  return jnp.mean(jnp.square(v_t - u_t), axis=-1)  # 对所有 32 维平均
+
+  没有显式的 action mask。 因为训练数据里后 25 维永远是
+  0，模型自然学会在那里输出 0，这 25 维的 MSE 贡献趋近于 0，不影响前 7
+  维的学习。
+
+  ---
+  一句话总结
+
+  基础模型用 32 维的"超集"动作空间，不同平台的实际低维动作通过 
+  PadStatesAndActions 补零填充到 32 
+  维，模型输出也自动在冗余维度上接近零——所以不需要每个平台单独配不同的输出头。
