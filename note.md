@@ -613,3 +613,91 @@ class FakeDataset(Dataset):  # ← 名义上也继承了
   基础模型用 32 维的"超集"动作空间，不同平台的实际低维动作通过 
   PadStatesAndActions 补零填充到 32 
   维，模型输出也自动在冗余维度上接近零——所以不需要每个平台单独配不同的输出头。
+
+
+
+
+
+---
+
+## π₀ / π₀.₅ 基座模型预训练用的是增量动作 (Delta)
+
+是的，**两者的基座模型都是在增量动作空间预训练的。** 证据非常清晰：
+
+### 证据 1：推理时永远有 AbsoluteActions 输出变换
+
+不管哪个平台，只要 pi0 模型上线推理，output 链末尾一定要加 `AbsoluteActions`：
+
+```
+policy_config.py:308
+output_transforms=[
+    *data_config.model_transforms.outputs,   # 模型后处理
+    transforms.Unnormalize(...),             # 反归一化
+    *data_config.data_transforms.outputs,    # ← AbsoluteActions 在这里
+]
+```
+
+如果基座模型预测的是绝对动作，就不需要这步。这步存在的唯一原因就是：**模型输出的是 delta（相对当前状态的差值），必须加回 state 才能变成绝对关节角去执行。**
+
+### 证据 2：extra_delta_transform 的注释
+
+```python
+# config.py:693-696
+LIBERO 数据集本身已经包含了增量动作（delta actions），
+但有些旧版本的 π₀ 检查点训练时使用了"双重增量"（extra delta）
+```
+
+翻译一下：
+- LIBERO 数据集存储的就是 delta（已经是"动作相对于状态"了）
+- **pi0 基座模型预训练时，在这个 delta 之上又做了一次 delta** → 模型学到的是"delta of delta"
+- pi0.5 升级后不再需要这个双重 delta
+
+所以 pi0 和 pi0.5 **都**在 delta 空间训练，只是 pi0 的 delta 层数不同。
+
+### 证据 3：所有下游微调配置都默认用 delta
+
+| 平台   | 工具                                    | 默认值                                               | 含义 |
+| ------ | --------------------------------------- | ---------------------------------------------------- | ---- |
+| ALOHA  | `use_delta_joint_actions=True`          | 先把绝对关节角 `actions -= state` 转 delta，再喂模型 |      |
+| LIBERO | `extra_delta_transform=False`           | 数据本身已是 delta，不必再转                         |      |
+| DROID  | 条件判断 `action_space==JOINT_POSITION` | 对关节位置类型加 delta                               |      |
+
+### 证据 4：唯一的反例——仿真环境关了 delta
+
+```python
+# config.py:1394
+TrainConfig(
+    name="pi0_aloha_sim",
+    data=LeRobotAlohaDataConfig(use_delta_joint_actions=False),  # ← 关了
+)
+```
+
+这说明**同一个基座模型可以微调在绝对动作空间上** —— 模型架构完全不需要改，只要数据预处理里不加 `DeltaActions`，模型就老老实实学绝对动作。
+
+---
+
+### 回答你的核心疑问
+
+> 这不应该是完全看基座模型 pi0 或者 pi0.5 训练时选择输出的是增量还是绝对动作吗？
+
+**你的直觉没错，但结论反了** —— 基座模型确实训练时选了输出增量动作。
+
+但关键在于：
+
+**这种"选择"不在模型架构里，在数据预处理里。**
+
+模型本质上就是一个函数 `f(观测) → 动作`，它对"增量 / 绝对"一无所知。你喂它什么 target，它就学什么：
+
+```
+修改前的数据流（基座预训练）：
+  原始动作(绝对) → DeltaActions(转增量) → Normalize → [模型学增量]
+
+修改后的数据流（pi0_aloha_sim 中的微调）：
+  原始动作(绝对) → (跳过 DeltaActions) → Normalize → [模型学绝对]
+```
+
+同一套基座权重，下游微调时通过调整 `use_delta_joint_actions` 就能切换动作空间。这是因为：
+1. 初始权重来自 delta 空间预训练
+2. **微调时**如果改用绝对动作，模型参数会通过梯度更新适应新的分布
+
+所以你的理解需要修正一点：**选择权不在模型架构层面，在数据变换（transforms）层面。** 这也是为什么 openpi 把 `DeltaActions` 放在 `data_transforms`（平台/数据层）而不放在 `model_transforms`（模型层）—— 它是个数据格式问题，不是模型架构问题。
