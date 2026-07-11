@@ -701,3 +701,114 @@ TrainConfig(
 2. **微调时**如果改用绝对动作，模型参数会通过梯度更新适应新的分布
 
 所以你的理解需要修正一点：**选择权不在模型架构层面，在数据变换（transforms）层面。** 这也是为什么 openpi 把 `DeltaActions` 放在 `data_transforms`（平台/数据层）而不放在 `model_transforms`（模型层）—— 它是个数据格式问题，不是模型架构问题。
+
+
+
+
+好问题。这两个 normalize 名字一样，但**做的事情、数据流向和作用域完全不同。**
+
+## 本质区别一览
+
+|              | `aloha_policy.py` 中的 `_normalize` / `_unnormalize`                                   | `transforms.py` 中的 `Normalize` 类                                             |
+| ------------ | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| **是什么**   | 手写的**线性归一化辅助函数**                                                           | 数据流水线中的**标准化变换组件**                                                |
+| **公式**     | `(x - min) / (max - min)` 映射到 `[0, 1]`                                              | Z-score: `(x - mean) / (std + 1e-6)` 映射到 `[-∞, +∞]` 或分位数映射到 `[-1, 1]` |
+| **作用范围** | 仅**夹爪**的 2 个维度（左/右夹爪的线性位移 ⇄ 角度转换）                                | **整个状态和动作向量**（state + actions 的所有维度）                            |
+| **实现位置** | `aloha_policy.py` 中的普通函数                                                         | `transforms.py` 中的 `DataTransformFn` 子类                                     |
+| **调用时机** | 在 `AlohaInputs`/`AlohaOutputs` 的 `__call__` 内部 → 属于 **data_transforms（第2层）** | 在 `transform_dataset()` 中作为独立步骤 → 属于 **Normalize（第3层）**           |
+
+---
+
+## 具体对比
+
+### `aloha_policy._normalize` — 物理量纲转换
+
+```python
+# aloha_policy.py:294-301
+def _normalize(x, min_val, max_val):
+    """将 x 从 [min_val, max_val] 线性映射到 [0, 1]。"""
+    return (x - min_val) / (max_val - min_val)
+```
+
+它做的是**线性映射**，作用是把夹爪的**原始物理值**从一个量纲转换到另一个量纲：
+
+```
+ALOHA 夹爪线性位移（米）  ─── _normalize ───→  [0, 1] 中间表示
+                         ── _unnormalize ──→  ALOHA 夹爪角度（弧度）
+```
+
+具体调用链看函数 `_gripper_to_angular`：
+
+```python
+# 第 1 步：反归一化到 ALOHA 的原始线性值（单位：米）
+value = _unnormalize(value, min_val=0.01844, max_val=0.05800)    # 线性位移 [米]
+# 第 2 步：线性位移 → 角度（弧度）
+value = linear_to_radian(value, arm_length=0.036, horn_radius=0.022)
+# 第 3 步：重新归一化到 π₀ 夹爪的 [0, 1] 范围
+return _normalize(value, min_val=0.5476, max_val=1.6296)         # 角度 [弧度]
+```
+
+**这在坐标系的内部转换，和数据标准化没有关系**。它解决的是"ALOHA 用线性位移表示夹爪开合，但 π₀ 预训练时用角度表示夹爪开合"这个**量纲不匹配**问题。
+
+### `transforms.Normalize` — 数值范围标准化
+
+```python
+# transforms.py:269
+def _normalize(self, x, stats: NormStats):
+    """Z-score 归一化。公式: x_norm = (x - mean) / (std + 1e-6)"""
+    mean, std = stats.mean[..., :x.shape[-1]], stats.std[..., :x.shape[-1]]
+    return (x - mean) / (std + 1e-6)
+```
+
+它做的是**标准化**，作用是把不同物理尺度的数值拉到同一量级，让模型训练时不偏袒大数值的特征：
+
+| 维度        | 原始范围                       | 归一化后               |
+| ----------- | ------------------------------ | ---------------------- |
+| 关节角      | 约 `[-π, π]` → `[-3.14, 3.14]` | 约 `[-3, 3]` (z-score) |
+| 夹爪        | 约 `[0, 1]`                    | 约 `[-2, 2]` (z-score) |
+| 末端 x 位移 | 约 `[0, 0.5]` 米               | 约 `[-2, 2]` (z-score) |
+
+**这步是为了训练稳定性，和坐标系无关。**
+
+---
+
+## 数据流中的位置
+
+完整的变换链是：
+
+```
+原始数据
+    │
+    ▼  [第1层: repack_transforms]  ← 键名重映射
+    │
+    ▼  [第2层: data_transforms]     ← AlohaInputs/AlohaOutputs (包含 _normalize/_unnormalize 夹爪转换)
+    │                                  + DeltaActions (如果是训练/推理 ALOHA)
+    │
+    ▼  [第3层: Normalize]           ← Z-score 标准化 (使用预计算统计量)
+    │
+    ▼  [第4层: model_transforms]    ← 分词、图像缩放等
+    │
+    ▼  模型输入
+```
+
+**`aloha_policy._normalize`** 在第 **2** 层 — 它在 `AlohaInputs.__call__()` 内部被调用，属于**平台特定的物理量纲转换**。
+
+**`transforms.Normalize`** 在第 **3** 层 — 它在 `transform_dataset()` 中作为独立步骤，属于**通用的数值标准化**。
+
+---
+
+## 为什么需要两个？
+
+因为这是两个完全不同的需求：
+
+```
+aloha_policy._normalize
+    "夹爪 0.03 米的线性位移 ≈ 夹爪 1.2 弧度的角度？"
+    → 做物理量纲换算，使 ALOHA 和 π₀ 用同一套"夹爪语言"
+
+transforms.Normalize
+    "关节角 -1.5 和夹爪 0.8 在数值上差 2 倍，模型会偏袒关节角！"
+    → 做 z-score，抹平量纲差异，让模型只看"相对变化"
+```
+
+**前者是"单位换算"（米→弧度），后者是"标准化"（不同物理量拉到同一数值尺度）。** 一个是定性的坐标系对齐，一个是定量的训练稳定性技巧。
