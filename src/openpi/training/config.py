@@ -1399,6 +1399,44 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=20_000,
     ),
+    TrainConfig( ##YannLau_Claude  推理    效果很差 没有微调过
+        name="pi05_aloha_sim",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotAlohaDataConfig(
+            assets=AssetsConfig(asset_id="trossen"),
+            default_prompt="Transfer cube",
+        ),
+        policy_metadata={"reset_pose": [0, -1.5, 1.5, 0, 0, 0]},
+    ),
+    TrainConfig(  ## YannLau   推理
+        name="my_pi05_aloha_sim",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotAlohaDataConfig(
+            assets=AssetsConfig(asset_id="trossen"),
+            default_prompt="Pick up cube",
+        ),
+        policy_metadata={"reset_pose": [0, -1.5, 1.5, 0, 0, 0]},
+    ),
+    TrainConfig(  ## YannLau   推理  成功了，拿起了cube
+        name="my_pi0_aloha_sim",
+        model=pi0_config.Pi0Config(),
+        data=LeRobotAlohaDataConfig(
+            assets=AssetsConfig(asset_id="lerobot/aloha_sim_transfer_cube_human"),
+            default_prompt="Transfer cube",
+            use_delta_joint_actions=False,  # 仿真中不使用 delta action
+        ),
+        policy_metadata={"reset_pose": [0, -1.5, 1.5, 0, 0, 0]},
+    ),
+    TrainConfig(  ## YannLau   推理  根本不遵从指令
+        name="yann_pi0_aloha_sim",
+        model=pi0_config.Pi0Config(),
+        data=LeRobotAlohaDataConfig(
+            assets=AssetsConfig(asset_id="lerobot/aloha_sim_transfer_cube_human"),
+            default_prompt="Push the cube out desk",
+            use_delta_joint_actions=False,  # 仿真中不使用 delta action
+        ),
+        policy_metadata={"reset_pose": [0, -1.5, 1.5, 0, 0, 0]},
+    ),
     # =========================================================
     #  调试配置（Debugging configs）
     # =========================================================
