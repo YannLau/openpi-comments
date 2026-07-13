@@ -10,6 +10,55 @@
 ============================================================
 """
 
+"""
+
+第一次运行该脚本
+后面输出一个进度条，下载大约4MB左右的数据，我很好奇，我明明已经下载了完整预训练权重，为何还会下载东西，这是什么？              
+  
+                                                  
+找到了！就是它：
+
+```python
+# tokenizer.py:18
+path = download.maybe_download(
+    "gs://big_vision/paligemma_tokenizer.model", gs={"token": "anon"}
+)
+```
+
+**这是 PaliGemma 的 SentencePiece 分词器模型文件**，大约 **3-5 MB**，下载后缓存在 `~/.cache/openpi/big_vision/paligemma_tokenizer.model`。
+
+跟你下载的那十几 GB 的**模型权重**完全是两回事。具体加载时间线是：
+
+```
+create_trained_policy() 内部
+    │
+    ├── 加载模型权重 ← 从你的本地 pi05_base/params/ 读取
+    │
+    ├── data_config = train_config.data.create(assets_dirs, model_config)
+    │   └── ModelTransformFactory()(model_config)
+    │       └── TokenizePrompt(PaligemmaTokenizer(...))
+    │           └── PaligemmaTokenizer.__init__()
+    │               └── download.maybe_download("gs://big_vision/paligemma_tokenizer.model")
+    │                   ↓
+    │        ← 第一次运行才会下载，约 4MB，缓存在 ~/.cache/openpi/ ← 你看到的进度条
+    │
+    ├── 组装 Policy 变换流水线
+    │
+    └── 返回 policy ← "策略加载成功！"
+```
+
+**为什么模型权重不包含 tokenizer 文件？**
+
+因为 tokenizer 是模型全家桶里一个独立的小文件。`pi05_base.params` 存的是**神经网络参数**（几十亿个浮点数），而 `paligemma_tokenizer.model` 是**文本分词用的词表 + 合并规则**（SentencePiece 格式，几 MB）。这两个东西来源不同：
+
+- 模型参数 → 从 `gs://openpi-assets/checkpoints/pi05_base/params/` 下载的
+- 分词器文件 → 从 `gs://big_vision/paligemma_tokenizer.model` 下载的（Google big_vision 项目维护）
+
+它们只是碰巧都在 GCS 上，但来自不同的 bucket。openpi 在代码里对两者分别调用 `maybe_download`，各自独立缓存。
+
+"""
+
+
 import logging
 
 import numpy as np

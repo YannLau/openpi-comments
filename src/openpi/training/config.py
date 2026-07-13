@@ -243,7 +243,7 @@ class DataConfig:
     # 资产目录中的子目录名，包含该数据集的归一化统计量。
     asset_id: str | None = None
 
-    # 预计算的归一化统计量。如果为 None，则不进行归一化。   在data_transforms中加载填充！
+    # 预计算的归一化统计量。如果为 None，则不进行归一化。   !!!!!!!!!!!!!!!!!!!!!!!!!!在DataConfigFactory中的 create_base_config 中加载归一化统计量
     # 字典的键是数据路径（如 "state", "actions"），值是 NormStats 对象。
     norm_stats: dict[str, _transforms.NormStats] | None = None
 

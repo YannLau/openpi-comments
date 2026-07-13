@@ -812,3 +812,57 @@ transforms.Normalize
 ```
 
 **前者是"单位换算"（米→弧度），后者是"标准化"（不同物理量拉到同一数值尺度）。** 一个是定性的坐标系对齐，一个是定量的训练稳定性技巧。
+
+
+
+
+
+-----
+
+
+
+没错，而且 `RepackTransform` 的映射方向是 **`{输出键: 数据集输入路径}`**：
+
+```python
+# transforms.py:172-176 (从注释就能看出方向)
+structure = {
+    "image": {"cam_high": "observation/images/top"},   # 新键 ← 从数据的哪里取值
+    "state": "observation/state",                        # 新键 ← 从数据的哪里取值
+    "actions": "action",                                 # 新键 ← 从数据的哪里取值
+}
+```
+
+拿三个平台对比，一目了然：
+
+```
+训练时数据流：
+  LeRobot 数据集格式                 →  repack 后格式                 → *Inputs 期望的格式
+───────────────────────────────────────────────────────────────────────────────────
+
+ALOHA:
+  observation.images.top             →  images.cam_high
+  observation.state                  →  state                        → AlohaInputs 正好吃这个
+  action                             →  actions
+
+LIBERO:
+  observation/image                  →  image
+  observation/state                  →  state                       → LiberoInputs 正好吃这个
+  actions                            →  actions
+
+DROID (RLDS):
+  observation/image (generic)        →  observation/exterior_image_1_left
+  observation/wrist_image (generic)  →  observation/wrist_image_left → DroidInputs 正好吃这个
+  observation/joint_position         →  observation/joint_position
+```
+
+### 所以 `make_*_example()` 的定位就很清楚了
+
+**它们返回的就是 repack **之后** —— 也就是 `*Inputs` 期望的格式**：
+
+| example 函数            | 返回格式                                                          | 等价于      | 直接喂给？        |
+| ----------------------- | ----------------------------------------------------------------- | ----------- | ----------------- |
+| `make_aloha_example()`  | `images.cam_high`, `state: [14]`                                  | repack 之后 | ✅ `AlohaInputs`  |
+| `make_droid_example()`  | `observation/exterior_image_1_left`, `observation/joint_position` | repack 之后 | ✅ `DroidInputs`  |
+| `make_libero_example()` | `image`, `state: [7]`（如果有的话）                               | repack 之后 | ✅ `LiberoInputs` |
+
+所以你的脚本直接用 `make_aloha_example()` 是完全正确的——它直接跳过了 repack 这步，因为推理时本来就不需要 repack（数据不是从 LeRobot 数据集读取的，而是从策略服务器直接来的）。
