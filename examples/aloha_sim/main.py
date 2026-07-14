@@ -25,12 +25,18 @@ class Args:
 
     display: bool = False
 
+    # Override cube initial position. Default random: x=[0,0.2], y=[0.4,0.6].
+    # Format: --box-pose x y z qw qx qy qz  (e.g. --box-pose 0.4 0.3 0.05 1 0 0 0)
+    box_pose: tuple[float, ...] | None = None
+
 
 def main(args: Args) -> None:
+    box_pose = list(args.box_pose) if args.box_pose is not None else None
     runtime = _runtime.Runtime(
         environment=_env.AlohaSimEnvironment(
             task=args.task,
             seed=args.seed,
+            box_pose=box_pose,
         ),
         agent=_policy_agent.PolicyAgent(
             policy=action_chunk_broker.ActionChunkBroker(
