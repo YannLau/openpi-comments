@@ -897,7 +897,7 @@ class DataLoaderImpl(DataLoader):
         # 将底层加载器产生的 dict 拆分为 (Observation, Actions) 元组
         # Observation 是模型的标准输入格式，actions 是标签
         for batch in self._data_loader:
-            yield _model.Observation.from_dict(batch), batch["actions"]
+            yield _model.Observation.from_dict(batch), batch["actions"]     # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 """
 好问题，完整链路非常清楚，我给你画出来：
