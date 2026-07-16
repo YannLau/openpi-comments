@@ -61,6 +61,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.tron2_policy as tron2_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -759,6 +760,58 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
         )
 
+@dataclasses.dataclass(frozen=True)
+class LeRobotTronDataConfig(DataConfigFactory):
+    
+    use_delta_joint_action: bool = True,
+    default_prompt: str | None = None,
+    adapt_to_pi: bool = False,
+    
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {"cam_high": "observation.images.top"},
+                        "state": "observation.state",
+                        "actions": "action",
+                    }
+                )
+            ]
+        )
+    )
+    
+    action_sequence_keys: Sequence[str] = ("actions",)
+    
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        
+        data_transforms = _transforms.Group(
+            inputs=[tron2_policy.Tron2Inputs(adapt_to_pi=self.adapt_to_pi)],
+            outputs=[tron2_policy.Tron2Outputs(adapt_to_pi=self.adapt_to_pi)],
+        )
+        # 2. 如果需要，添加增量动作变换
+        if self.use_delta_joint_actions:
+            delta_action_mask = _transforms.make_bool_mask(7, -1, 7, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        # 3. 创建模型变换（使用 ModelTransformFactory）
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        # 4. 组合所有配置
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+
 
 @dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
@@ -1399,7 +1452,7 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=20_000,
     ),
-    TrainConfig( ##YannLau_Claude  推理    效果很差 没有微调过
+    TrainConfig( # YannLau_Claude  简单的仿真环境中推理    效果很差  pi05没有在mujoco中这个任务上微调过
         name="pi05_aloha_sim",
         model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotAlohaDataConfig(
@@ -1408,7 +1461,7 @@ _CONFIGS = [
         ),
         policy_metadata={"reset_pose": [0, -1.5, 1.5, 0, 0, 0]},
     ),
-    TrainConfig(  ## YannLau   推理
+    TrainConfig(  ## YannLau   简单的仿真环境中推理
         name="my_pi05_aloha_sim",
         model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotAlohaDataConfig(
@@ -1417,7 +1470,7 @@ _CONFIGS = [
         ),
         policy_metadata={"reset_pose": [0, -1.5, 1.5, 0, 0, 0]},
     ),
-    TrainConfig(  ## YannLau   推理  成功了，拿起了cube
+    TrainConfig(  ## YannLau   简单的仿真环境中推理  成功了，拿起了cube
         name="my_pi0_aloha_sim",
         model=pi0_config.Pi0Config(),
         data=LeRobotAlohaDataConfig(
@@ -1427,7 +1480,7 @@ _CONFIGS = [
         ),
         policy_metadata={"reset_pose": [0, -1.5, 1.5, 0, 0, 0]},
     ),
-    TrainConfig(  ## YannLau   推理  根本不遵从指令
+    TrainConfig(  ## YannLau   简单的仿真环境中推理  根本不遵从指令
         name="yann_pi0_aloha_sim",
         model=pi0_config.Pi0Config(),
         data=LeRobotAlohaDataConfig(
@@ -1496,6 +1549,36 @@ _CONFIGS = [
     # RoboArena & PolaRiS 配置（其他平台的配置，单独文件中定义）
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
+    
+    # Tron2 配置文件-母板
+    TrainConfig(
+        name="pi05_tron_example",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotTronDataConfig(
+            repo_id="xxxxxxx",  # Lerobot内部环境变量：export HF_LEROBOT_HOME=xxxx  数据集存放的目录
+            default_prompt="XXXXXXX", # 任务的提示词,训练时会被数据集中的提示词覆盖，推理时会使用推理服务器的Policy中的，不走这里的
+            use_delta_joint_action=False, #为什么这里不需要使用 增量动作 ？
+            adapt_to_pi=False,
+            action_sequence_keys=("action",),
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "image":{
+                                "cam_high":"observation.images.cam_high",
+                                "cam_left_wrist":"observation.images.cam_left_wrist",
+                                "cam_right_wrist":"observation.images.cam_right_wrist"
+                            },
+                            "state":"observation.state",
+                            "actions":"action",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("xxxxxxx"),
+        num_train_steps=20_000,
+    ),
 ]
 
 """  使用 SimpleDataConfig 的变体（没有 repo_id），意味着不会加载训练数据。  pi0_droid配置使用了SimpleDataConfig，不加载训练数据，那么这个配置还有什么用呢？     

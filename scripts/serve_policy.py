@@ -63,6 +63,7 @@ class EnvMode(enum.Enum):
     ALOHA_SIM = "aloha_sim"  # ALOHA 仿真环境（MuJoCo 模拟器）
     DROID = "droid"  # DROID 数据集中的机器人平台
     LIBERO = "libero"  # LIBERO 仿真基准测试套件
+    
 
 
 # ============================================================================
@@ -197,6 +198,11 @@ DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
     EnvMode.LIBERO: Checkpoint(
         config="pi05_libero",
         dir="gs://openpi-assets/checkpoints/pi05_libero",
+    ),
+    # Tron2 配置文件-母板
+    EnvMode.TRON2_REAL: Checkpoint(
+        config="pi05_tron_example",
+        dir="xxxxxxxxx"
     ),
 }
 
