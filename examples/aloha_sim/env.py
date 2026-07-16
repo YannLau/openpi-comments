@@ -363,7 +363,7 @@ class AlohaSimEnvironment(_environment.Environment):
         }
 
 """
-找到了完整链路！答案很清晰——**uint8 是传输格式，模型内部会自动转成 [-1, 1] 的 float32**。看数据流：
+找到了完整链路！答案很清晰——**uint8 是传输格式，模型内部会自动转成 [-1, 1] 的 float32**（通过model.Observation.from_dict(xxx)）。看数据流：
 
 ## 图像全链路追踪
 
