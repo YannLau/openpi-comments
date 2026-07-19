@@ -1088,3 +1088,52 @@ absolute 动作分布: 覆盖 [-π, π] 整个关节范围               ← 分
 ## 一句话总结
 
 **`use_delta_joint_action` 不取决于基座模型，而取决于你的数据集和机器人的控制接口。** pi0_base/pi05_base 参数足够灵活，微调时可以对同一个基座模型选择开或不开，只要保证训练时的数据格式和推理时的输出变换一致即可。
+
+
+# 这是未转化的lerobot数据集 @~/Downloads/lerobot_2026-07-17_16-12-18/ ，这是训练前需要运行的 @scripts/compute_norm_stats.py 脚本，对数据集进行归一化统计，请你确定图像相关的统计量最后用的是什么？是不是压根不对图像进行统计？  
+
+
+# ## 结论：图像不参与归一化统计量计算
+
+你的直觉是对的。**`compute_norm_stats.py` 压根不对图像进行统计**，原因和完整链路如下：
+
+---
+
+### 1. 脚本只统计 `state` 和 `actions`
+
+`compute_norm_stats.py:324` 明确写死了：
+
+```python
+keys = ["state", "actions"]
+```
+
+遍历数据集时只累加这两个字段的均值和标准差，**完全不碰图像数据**。
+
+### 2. 图像走的是固定公式，不依赖统计量
+
+图像归一化在 `model.py:205-209`（`Observation.from_dict()`）中完成：
+
+```python
+# 如果图像是 uint8 格式，转换为 [-1, 1] 的 float32
+data["image"][key] = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
+```
+
+这是一个**固定的线性映射**：`uint8 [0, 255] → float32 [-1, 1]`，不依赖任何数据集统计量（不需要 mean/std）。
+
+### 3. 训练时的完整管线
+
+```
+原始数据
+  ↓ repack_transforms（字段重映射）
+  ↓ data_transforms（AlohaInputs、DeltaActions 等）
+  ↓ Normalize(norm_stats)  ← 只归一化 state 和 actions（Z-score），图像不动
+  ↓ model_transforms → TokenizePrompt → ResizeImages → ...
+  ↓ Observation.from_dict()  ← 图像在这里做 uint8 → [-1, 1]
+```
+
+`Normalize` 使用 `apply_tree()` 按 key 匹配——`norm_stats` 里只有 `state` 和 `actions`，所以图像字段在 `Normalize` 这一步直接透传，不做任何处理。
+
+### 4. 为什么这样设计？
+
+- **state/actions**：不同机器人、不同数据集的数值范围差异巨大（关节角度可能 ±180°，末端位姿可能是毫米级），必须用数据驱动的 Z-score 归一化才能统一尺度。
+- **图像**：RGB 像素值的范围永远在 [0, 255]，直接做 `/255*2-1 → [-1, 1]` 就够了，不需要也不应该用数据集统计量。如果用了 mean/std，反而可能导致不同数据集的图像颜色分布被扭曲得不一致。
