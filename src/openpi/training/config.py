@@ -763,7 +763,7 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 @dataclasses.dataclass(frozen=True)
 class LeRobotTronDataConfig(DataConfigFactory):
     
-    use_delta_joint_action: bool = True,
+    use_delta_joint_actions: bool = True,
     default_prompt: str | None = None,
     adapt_to_pi: bool = False,
     
@@ -1557,7 +1557,7 @@ _CONFIGS = [
         data=LeRobotTronDataConfig(
             repo_id="xxxxxxx",  # Lerobot内部环境变量：export HF_LEROBOT_HOME=xxxx  数据集存放的目录
             default_prompt="XXXXXXX", # 任务的提示词,训练时会被数据集中的提示词覆盖，推理时会使用推理服务器的Policy中的，不走这里的
-            use_delta_joint_action=False, #为什么这里不需要使用 增量动作 ？
+            use_delta_joint_actions=False, #为什么这里不需要使用 增量动作 ？
             adapt_to_pi=False,
             action_sequence_keys=("action",),
             repack_transforms=_transforms.Group(
@@ -1578,6 +1578,82 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("xxxxxxx"),
         num_train_steps=20_000,
+    ),
+        
+    # Tron2 配置文件-单条数据集运行
+    TrainConfig(
+        name="pi05_tron_single_data",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotTronDataConfig(
+            assets = AssetsConfig(assets_dir="/home/punk/yann_repo/openpi/assets/pi05_tron_single_data/",asset_id="lerobot_2026-07-20_09-31-04") ,
+            repo_id="lerobot_2026-07-20_09-31-04",  # Lerobot内部环境变量：export HF_LEROBOT_HOME=xxxx  数据集存放的目录
+            default_prompt="Put the banana on the plate.", # 任务的提示词,训练时会被数据集中的提示词覆盖，推理时会使用推理服务器的Policy中的，不走这里的
+            use_delta_joint_actions=False, #为什么这里不需要使用 增量动作 ？
+            adapt_to_pi=False,
+            action_sequence_keys=("action",),
+            base_config=DataConfig(prompt_from_task=True), # 从数据集中获取prompt
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "image":{
+                                "cam_high":"observation.images.cam_high",
+                                "cam_left_wrist":"observation.images.cam_left_wrist",
+                                "cam_right_wrist":"observation.images.cam_right_wrist"
+                            },
+                            "state":"observation.state",
+                            "actions":"action",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/home/punk/yann_repo/para_check_pi0.5/yann_paras/checkpoint/openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=2,
+    ),
+    # Tron2 配置文件-单条数据集运行 lora 微调
+    TrainConfig(
+        name="pi05_tron_single_data_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotTronDataConfig(
+            assets = AssetsConfig(
+                assets_dir="/home/punk/yann_repo/openpi/assets/pi05_tron_single_data/",
+                asset_id="lerobot_2026-07-20_09-31-04",
+            ) ,
+            repo_id="lerobot_2026-07-20_09-31-04",  # Lerobot内部环境变量：export HF_LEROBOT_HOME=xxxx  数据集存放的目录
+            default_prompt="Put the banana on the plate.", # 任务的提示词,训练时会被数据集中的提示词覆盖，推理时会使用推理服务器的Policy中的，不走这里的
+            use_delta_joint_actions=True,
+            adapt_to_pi=False,
+            action_sequence_keys=("action",),
+            base_config=DataConfig(prompt_from_task=True), # 从数据集中获取prompt
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "image":{
+                                "cam_high":"observation.images.cam_high",
+                                "cam_left_wrist":"observation.images.cam_left_wrist",
+                                "cam_right_wrist":"observation.images.cam_right_wrist"
+                            },
+                            "state":"observation.state",
+                            "actions":"action",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/home/punk/yann_repo/para_check_pi0.5/yann_paras/checkpoint/openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=2,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora"                           
+        ).get_freeze_filter(),
+        ema_decay=None,
     ),
 ]
 

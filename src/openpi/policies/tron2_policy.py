@@ -24,7 +24,7 @@ def make_aloha_example() -> dict:
     """
     return {
         "state": np.ones((14,)),  # 14维关节状态（ALOHA 机器人：7+1+7+1 关节空间）
-        "images": {
+        "image": {
             "cam_high": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),         # 高清全局摄像头
             "cam_low": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),          # 低清全局摄像头
             "cam_left_wrist": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),   # 左腕部摄像头
@@ -112,7 +112,7 @@ class Tron2Inputs(transforms.DataTransformFn):
         # ================================================================
         # 第 2 步：验证摄像头名称
         # ================================================================
-        in_images = data["images"]
+        in_images = data["image"]
         if set(in_images) - set(self.EXPECTED_CAMERAS):
             raise ValueError(
                 f"Expected images to contain {self.EXPECTED_CAMERAS}, got {tuple(in_images)}"
@@ -483,11 +483,11 @@ def _decode_tron2(data: dict, *, adapt_to_pi: bool = False) -> dict:
         # 这是因为模型内部（通常是 CNN 或 ViT）期望 HWC 格式
         return einops.rearrange(img, "c h w -> h w c")
 
-    images = data["images"]
+    images = data["image"]
     images_dict = {name: convert_image(img) for name, img in images.items()}
 
     # ---- 更新数据字典 ----
-    data["images"] = images_dict
+    data["image"] = images_dict
     data["state"] = state
     return data
 
