@@ -1620,7 +1620,7 @@ _CONFIGS = [
             action_expert_variant="gemma_300m_lora",
         ),
         data=LeRobotTronDataConfig(
-            assets = AssetsConfig(
+            assets = AssetsConfig( # 配置数据集统计量
                 assets_dir="/home/punk/yann_repo/openpi/assets/pi05_tron_single_data/",
                 asset_id="lerobot_2026-07-20_09-31-04",
             ) ,
