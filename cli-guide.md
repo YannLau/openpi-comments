@@ -31,3 +31,9 @@ MUJOCO_GL=egl uv run examples/aloha_sim/main.py --args.box-pose 0.05 0.55 0.05 1
 
   # 测试 Cube 放在正前方远处 (x=0.25, y=0.50)
 MUJOCO_GL=egl uv run examples/aloha_sim/main.py --args.box-pose 0.25 0.50 0.05 1 0 0 0
+
+
+
+
+
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9  uv run scripts/train.py pi05_tron_single_data_lora --exp-name=tron2_single_data --overwrite --no-wandb_enabled --batch_size=1
