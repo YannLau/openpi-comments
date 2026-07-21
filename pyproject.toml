@@ -39,6 +39,8 @@ dependencies = [
     "rich>=14.0.0",
     "polars>=1.30.0",
     "jupyter>=1.1.1",
+    "pip>=26.1.2",
+    "pqi>=4.0.2",
 ]
 
 
