@@ -1008,3 +1008,98 @@ num_steps=50： 走 50 小步      →  更精准但更慢
 
 **模型的能力是一样的，你只是控制积分精度。** 实际上默认 10 步就是经验上平衡速度和质量的折中值，你想要更好的质量就调到 20、50；想要更快就调到 3、5。
 """
+
+
+
+
+"""
+@src/openpi/models/pi0.py 中 Pi0模型是否限制了Observation中图像的数量？如果不同平台相机数量不一样有何影响？
+
+
+现在清楚了，来完整回答。
+
+---
+
+## 模型层面：不限制相机数量
+
+Pi0 模型本身对相机数量是**完全无限制**的。核心原因在 `embed_prefix` 的实现：
+
+```python
+# pi0.py:427
+for name in obs.images:
+    image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
+    tokens.append(image_tokens)
+    input_mask.append(...)   # 根据 image_masks 设置有效/无效
+```
+
+它是一个 **`for` 循环遍历字典**——不管你传 1 张、3 张还是 5 张图像，只要 `obs.images` 字典里有，它就逐张编码，然后全部拼到序列里。
+
+再看 `Observation` 的类型定义：
+
+```python
+# model.py:141
+images: dict[str, at.Float[ArrayT, "*b h w c"]]      # 字典，不限制键数量
+image_masks: dict[str, at.Bool[ArrayT, "*b"]]         # 同样
+```
+
+**没有任何长度检查、数量校验或固定长度的假设。** 从模型架构角度，你传 1 个还是 10 个摄像头都能跑。
+
+---
+
+## 那影响在哪里？
+
+影响不在**模型架构**，在**数据流水线的一致性**：
+
+### 1. 前缀长度 = 所有图像 token 数之和
+
+```
+每张图像 → SigLIP → ~256 个图像 token
+提示文本 → Gemma → ~48~200 个文本 token
+
+总前缀长度 = 相机数 × 256 + 文本 token 数
+```
+
+如果训练时用 3 个相机（前缀 = `3×256 + N`），推理时突然传 5 个相机（前缀 = `5×256 + N`）：
+
+- **JAX 模型** → 新输入形状会导致 XLA **重新编译**（首次很慢）
+- **PyTorch 模型** → 不一定报错，但推理结果可能不同（训练时未见过这么多相机输入的情况）
+
+### 2. 相机数量和训练数据决定了模型"见过"什么
+
+模型虽然架构上不限制相机数，但**预训练时用的是固定的相机配置**：
+
+```python
+# pi0_config.py:179-187 — 基座模型训练时的输入规格
+images={
+    "base_0_rgb": ...,           # 主摄像头
+    "left_wrist_0_rgb": ...,     # 左腕
+    "right_wrist_0_rgb": ...,    # 右腕
+}
+```
+
+所以实际的"约定"是 3 个相机。平台策略通过 image_mask 机制处理缺失摄像头：
+
+```python
+# droid_policy.py:48-51 - DROID 只有 2 个真实摄像头
+match self.model_type:
+    case _model.ModelType.PI0 | _model.ModelType.PI05:
+        images = (base_image, wrist_image, np.zeros_like(base_image))  # 第3个用黑图填充
+        image_masks = (np.True_, np.True_, np.False_)                   # 标记无效
+```
+
+### 3. 实际平台对比
+
+| 平台       | 真实相机数              | inputs_spec 定义的相机 | image_mask                                |
+| ---------- | ----------------------- | ---------------------- | ----------------------------------------- |
+| **ALOHA**  | 3（主摄 + 左腕 + 右腕） | 3                      | 全部 True                                 |
+| **DROID**  | 2（外景 + 左腕）        | 3                      | `[True, True, False]` — 第 3 个是黑图填充 |
+| **LIBERO** | 2（主摄 + 腕部）        | 3                      | `[True, True, False]` — 第 3 个是黑图填充 |
+
+---
+
+## 一句话总结
+
+**模型不对图像数量做任何限制**——它就是遍历 `obs.images` 字典，来多少处理多少。
+唯一的要求是**训练时的配置和推理时的配置一致**（相同的 inputs_spec），否则 XLA 会重新编译。
+多出来的摄像头直接加到前缀序列里，缺失的摄像头用 `image_mask=False` 让模型跳过——这就是整个机制的弹性所在。
+"""

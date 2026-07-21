@@ -812,3 +812,279 @@ transforms.Normalize
 ```
 
 **前者是"单位换算"（米→弧度），后者是"标准化"（不同物理量拉到同一数值尺度）。** 一个是定性的坐标系对齐，一个是定量的训练稳定性技巧。
+
+
+
+
+
+-----
+
+
+
+没错，而且 `RepackTransform` 的映射方向是 **`{输出键: 数据集输入路径}`**：
+
+```python
+# transforms.py:172-176 (从注释就能看出方向)
+structure = {
+    "image": {"cam_high": "observation/images/top"},   # 新键 ← 从数据的哪里取值
+    "state": "observation/state",                        # 新键 ← 从数据的哪里取值
+    "actions": "action",                                 # 新键 ← 从数据的哪里取值
+}
+```
+
+拿三个平台对比，一目了然：
+
+```
+训练时数据流：
+  LeRobot 数据集格式                 →  repack 后格式                 → *Inputs 期望的格式
+───────────────────────────────────────────────────────────────────────────────────
+
+ALOHA:
+  observation.images.top             →  images.cam_high
+  observation.state                  →  state                        → AlohaInputs 正好吃这个
+  action                             →  actions
+
+LIBERO:
+  observation/image                  →  image
+  observation/state                  →  state                       → LiberoInputs 正好吃这个
+  actions                            →  actions
+
+DROID (RLDS):
+  observation/image (generic)        →  observation/exterior_image_1_left
+  observation/wrist_image (generic)  →  observation/wrist_image_left → DroidInputs 正好吃这个
+  observation/joint_position         →  observation/joint_position
+```
+
+### 所以 `make_*_example()` 的定位就很清楚了
+
+**它们返回的就是 repack **之后** —— 也就是 `*Inputs` 期望的格式**：
+
+| example 函数            | 返回格式                                                          | 等价于      | 直接喂给？        |
+| ----------------------- | ----------------------------------------------------------------- | ----------- | ----------------- |
+| `make_aloha_example()`  | `images.cam_high`, `state: [14]`                                  | repack 之后 | ✅ `AlohaInputs`  |
+| `make_droid_example()`  | `observation/exterior_image_1_left`, `observation/joint_position` | repack 之后 | ✅ `DroidInputs`  |
+| `make_libero_example()` | `image`, `state: [7]`（如果有的话）                               | repack 之后 | ✅ `LiberoInputs` |
+
+所以你的脚本直接用 `make_aloha_example()` 是完全正确的——它直接跳过了 repack 这步，因为推理时本来就不需要 repack（数据不是从 LeRobot 数据集读取的，而是从策略服务器直接来的）。
+
+
+
+
+
+
+# pi0.5模型的数据管线中，归一化统计量需要图像部分的吗？需要对数据集中的图像进行统计吗？
+
+## 代码直接回答：不需要
+
+看 `compute_norm_stats.py` 第 324 行：
+
+```python
+keys = ["state", "actions"]  # ← 只算这两个！
+```
+
+再看 `Observation.from_dict()` 第 206-209 行：
+
+```python
+# 图像是固定公式转换，不涉及统计量
+data["image"][key] = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
+```
+
+两者放的管道位置也不同：
+
+```
+计算 stats 时的换链：
+  repack → data_transforms → RemoveStrings → 扫数据集算 mean/std
+                                ↑
+                      state 和 actions 在这里被转换
+
+训练时的变换链：
+  repack → data_transforms → Normalize(...) → model_transforms → from_dict
+                                 ↑                ↑                   ↑
+                     state/actions 走统计归一化    图像缩放/分词        图像 uint8 → [-1,1]
+                    (用算好的 mean/std)                               (固定公式，不要 stats)
+```
+
+## 为什么图像不需要统计量？
+
+因为两层归一化的**目标不同**：
+
+|                    | state / actions                                       | image                                                   |
+| ------------------ | ----------------------------------------------------- | ------------------------------------------------------- |
+| **数据范围**       | 因机器人而异（关节角 ±π rad，夹爪 0~0.058m，力 N...） | 通用标准（像素 0~255）                                  |
+| **问题**           | 不同维度的尺度差几个数量级，不归一化会主导梯度        | 像素范围是固定的，不存在"某通道值特别大"的问题          |
+| **手段**           | `Normalize` 用数据集的 mean/std 做 Z-score            | /255×2-1 固定映射到 [-1, 1]                             |
+| **为什么不等同？** | 你需要知道"这个关节在数据集里的典型值是多少"          | 像素的 0 永远是黑、255 永远是白，**语义不随数据集改变** |
+
+> 换个角度理解：**如果图像也需要数据集级别的统计量，那预训练模型的图像接受范围就不固定了**——每次换数据集都要重新训练模型的第一层，这在视觉模型（ViT，ResNet 等）的设计中是不存在的。视觉模型一贯约定输入在某个固定范围（[0,1], [-1,1], 或 ImageNet mean/std），图像处理只是"把像素值塞到这个范围"。
+
+## 但有一个例外：ImageNet 预训练的常规做法
+
+传统的 CV 模型（ResNet, ViT 等）做 **ImageNet 归一化**：
+
+```python
+# ImageNet 的像素统计量（全数据集的 mean/std）
+mean = [0.485, 0.456, 0.406]  # RGB 三通道的均值
+std  = [0.229, 0.224, 0.225]  # RGB 三通道的标准差
+
+# 使用方式
+image = (image / 255.0 - mean) / std  # 先转 [0,1]，再减均值除标准差
+```
+
+openpi 为什么不用这套？因为 **SigLIP 视觉编码器预训练时用的就是 [-1, 1]**（Gemma/PaliGemma 家族的惯例），所以模型的第一层权重就是在 [-1, 1] 输入下训好的。用 ImageNet 的 mean/std 反而会破坏预训练权重的假设。
+
+## 总结
+
+- **不需要对图像计算统计量**，图像走固定公式 `uint8 / 255.0 * 2.0 - 1.0` 映射到 [-1, 1]
+- **只有 state 和 actions** 需要数据集级别的统计量归一化
+- 这是由 **SigLIP 视觉编码器的预训练约定**决定的，不是 openpi 特有的设计
+
+
+
+
+# use_delta_joint_action=False  是否开启的本质是什么？为什么 @src/openpi/training/config.py 中的aloha仿真（pi0_aloha_sim）和pi05_tron_example不需要设置True？  
+  我的理解是，如果是微调任务，基座模型比如pi05_base权重文件在当时训练如果用了delta_joint，后面的微调数据集是一定也要使用delta_joint的，对吗？
+
+好问题，让我从代码和数据流的角度彻底讲清楚。
+
+---
+
+## 一、`use_delta_joint_action` 的本质
+
+它是一个 **数据预处理开关**，控制是否在训练/推理流水线中插入一对互逆的变换：
+
+| 开关      | 输入变换（训练）                               | 输出变换（推理）                                  |
+| --------- | ---------------------------------------------- | ------------------------------------------------- |
+| **True**  | `DeltaActions`: `actions[关节] -= state[关节]` | `AbsoluteActions`: `actions[关节] += state[关节]` |
+| **False** | 无变换（直接用原始数据）                       | 无变换（模型输出直接执行）                        |
+
+核心代码（`transforms.py:431-446`）：
+
+```python
+# DeltaActions 做的就这一行：
+actions[..., :dims] -= np.expand_dims(np.where(mask, state[..., :dims], 0), axis=-2)
+# 即：对 mask=True 的维度，从 actions 中减去 state（当前关节角）
+# 结果 = "相对于当前位置，还要移动多少"
+```
+
+所以开关的本质不是模型参数，而是 **决定模型学到的是"绝对目标位置"还是"相对于当前位置的偏移量"**。
+
+---
+
+## 二、为什么 `pi0_aloha_sim` 和 `pi05_tron_example` 不需要开？
+
+先说结论：**取决于你的数据集里存的是什么格式的 action + 你的机器人底层控制器要什么格式。**
+
+### 1. `pi0_aloha_sim` 的情况
+
+对比两行 config：
+
+| 配置                  | dataset         | 底层控制器       | 数据集 action 格式 | use_delta_joint_actions |
+| --------------------- | --------------- | ---------------- | ------------------ | ----------------------- |
+| `pi0_aloha_pen_uncap` | 实物 ALOHA 数据 | **绝对位置**控制 | 存的是绝对关节角   | ✅ True (abs→delta)     |
+| `pi0_aloha_sim`       | MuJoCo 仿真     | **增量位置**控制 | 存的已经是 delta   | ❌ False (已是delta)    |
+
+**真实 ALOHA 机器人**：底层电机控制器接收**绝对关节角**（"移动到 0.5 rad"），所以数据集里 actions 存的是绝对关节角。
+
+**ALOHA Sim（MuJoCo）**：仿真环境底层接收**增量关节角**（"关节再转 0.02 rad"），所以数据集 `lerobot/aloha_sim_transfer_cube_human` 里的 actions 存的**已经是 delta 值了**。
+
+如果你对 sim 数据再把 `use_delta_joint_actions=True`，那就等于 `delta - state = 二次delta`，相当于对一个已经是增量的值再减去状态——得到错误结果。
+
+### 2. `pi05_tron_example` 的情况
+
+Tron2 的 action 空间是 **16 维**（7+1+7+1），和 ALOHA（6+1+6+1=14维）不同。
+
+```python
+# LeRobotTronDataConfig 中的 delta mask 定义
+delta_action_mask = _transforms.make_bool_mask(7, -1, 7, -1)
+# 结果是：[T]*7 + [F] + [T]*7 + [F] = 16 维
+```
+
+但你设了 `use_delta_joint_action=False`，所以这段代码根本不会执行。原因可能是：
+
+1. **你收集的 Tron2 数据集，actions 已经是 delta 格式了**（同 sim 一样）
+2. **或者 Tron2 的控制器直接用绝对关节角**，模型直接输出绝对位置效果就很好
+3. **或者你的数据 action 格式特殊**（比如速度控制），delta 转换在语义上没有意义
+
+无论哪种，结论都是：**当前数据的 action 格式已经可以直接喂给模型训练，不需要额外转换。**
+
+---
+
+## 三、你的核心问题：微调时是否必须和基座模型一致？
+
+> "如果基座模型比如pi05_base权重文件在当时训练如果用了delta_joint，后面的微调数据集是一定也要使用delta_joint的，对吗？"
+
+### 代码层面的直接证据：不需要
+
+看一下 `_CONFIGS` 中的两个配置，它们**都从同一个 `pi0_base` 权重加载，但 delta 设置不同**：
+
+```python
+# 配置 A: pi0_aloha_sim  → use_delta_joint_actions=False
+TrainConfig(
+    name="pi0_aloha_sim",
+    data=LeRobotAlohaDataConfig(
+        repo_id="lerobot/aloha_sim_transfer_cube_human",
+        use_delta_joint_actions=False,          # ← 不开
+    ),
+    weight_loader=CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),  # ← 同一个权重
+    num_train_steps=20_000,
+)
+
+# 配置 B: pi0_aloha_pen_uncap → use_delta_joint_actions=True（默认值）
+TrainConfig(
+    name="pi0_aloha_pen_uncap",
+    data=LeRobotAlohaDataConfig(
+        repo_id="physical-intelligence/aloha_pen_uncap_diverse",
+        default_prompt="uncap the pen",
+        # use_delta_joint_actions 取默认值 True       ← 开
+    ),
+    weight_loader=CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),  # ← 同一个权重
+    num_train_steps=20_000,
+)
+```
+
+**从同一个 `pi0_base` 出发，一个开 delta 一个不开，两个都工作。** 这直接反驳了"必须一致"这个说法。
+
+### 为什么不需要一致？
+
+关键在于**`weight_loader` 只加载参数的初始值，不固定模型的输出格式**：
+
+```
+         pi0_base 参数（初始值）
+              │
+     ┌────────┴────────┐
+     ▼                 ▼
+  微调+delta        微调无delta
+  模型学增量动作    模型学绝对动作
+     │                 │
+     ▼                 ▼
+  推理时用           推理时用
+  AbsoluteActions    原始输出
+  把delta还原为absolute
+```
+
+模型只是一个函数逼近器。训练 20k 步足够让参数调整到适应新的动作格式。pi0_base 本身在预训练阶段就处理过**多种多样**的动作表示——不同机器人平台有不同格式，所以模型参数天然具有适应不同动作格式的灵活性。
+
+### Flow Matching 的特殊性
+
+π₀ 用 **flow matching** 训练——模型学习从噪声到数据分布的"流场"。如果你切换了动作格式（比如从 delta 切换到 absolute），数据分布变化很大：
+
+```
+delta 动作分布:  centered around 0, 范围约 [-0.1, 0.1]  ← 集中
+absolute 动作分布: 覆盖 [-π, π] 整个关节范围               ← 分散
+```
+
+这意味着流场需要大幅调整。但 **20k 步的微调完全可以做到这一点**（证据就是上面两个配置都能正常工作）。
+
+### 真正决定是否开 delta 的三个因素
+
+| 因素           | 问题                                   | 例子                                                 |
+| -------------- | -------------------------------------- | ---------------------------------------------------- |
+| **数据集格式** | 你的 actions 存的是绝对还是增量？      | ALOHA Sim 存 delta → 不开；ALOHA Real 存绝对 → 开    |
+| **控制器类型** | 机器人底层吃绝对位置还是增量？         | 实物吃绝对位置 → 推理时需要 AbsoluteActions 转换回来 |
+| **训练稳定性** | delta 将预测范围压缩到小值，训练更容易 | 精细操作场景（插笔帽）开 delta 更稳定                |
+
+---
+
+## 一句话总结
+
+**`use_delta_joint_action` 不取决于基座模型，而取决于你的数据集和机器人的控制接口。** pi0_base/pi05_base 参数足够灵活，微调时可以对同一个基座模型选择开或不开，只要保证训练时的数据格式和推理时的输出变换一致即可。
