@@ -1,0 +1,720 @@
+ ▐▛███▜▌   Claude Code v2.1.207
+▝▜█████▛▘  deepseek-v4-flash · API Usage Billing
+  ▘▘ ▝▝    ~/yann_repo/openpi
+
+
+❯ /rename action_seq_check 
+  ⎿  Session renamed to: action_seq_check
+
+❯ 请你检查 @examples/checkout_action_seq.ipynb 和 config.py中的   TrainConfig(  
+          name="pi05_tron_single_data_lora",                                    
+          model=pi0_config.Pi0Config(                                           
+              pi05=True,                                                        
+              paligemma_variant="gemma_2b_lora",                                
+              action_expert_variant="gemma_300m_lora",                          
+          ),                                                                    
+          data=LeRobotTronDataConfig(                                           
+              assets = AssetsConfig( # 配置数据集统计量                         
+                                                                                
+  assets_dir="/home/punk/yann_repo/openpi/assets/pi05_tron_single_data/",       
+                  asset_id="lerobot_2026-07-20_09-31-04",                       
+              ) ,                                                               
+              repo_id="lerobot_2026-07-20_09-31-04",  #                         
+  Lerobot内部环境变量：export HF_LEROBOT_HOME=xxxx  数据集存放的目录            
+              default_prompt="Put the banana on the plate.", # 任务的提示词,训  
+  练时会被数据集中的提示词覆盖，推理时会使用推理服务器的Policy中的，不走这里的  
+              use_delta_joint_actions=False,                                    
+              adapt_to_pi=False,                                                
+              action_sequence_keys=("action",),                                 
+              base_config=DataConfig(prompt_from_task=True,norm_stats=None), #  
+  从数据集中获取prompt                                                          
+              repack_transforms=_transforms.Group(                              
+                  inputs=[                                                      
+                      _transforms.RepackTransform(                              
+                          {                                                     
+                              "image":{                                         
+                                  "cam_high":"observation.images.cam_high",     
+                                                                                
+  "cam_left_wrist":"observation.images.cam_left_wrist",                         
+                                                                                
+  "cam_right_wrist":"observation.images.cam_right_wrist"                        
+                              },                                                
+                              "state":"observation.state",                      
+                              "actions":"action",                               
+                          }                                                     
+                      )                                                         
+                  ]                                                             
+              )                                                                 
+          ),                                                                    
+          weight_loader=weight_loaders.CheckpointWeightLoader("/home/punk/yann_ 
+  repo/para_check_pi0.5/yann_paras/checkpoint/openpi-assets/checkpoints/pi05_ba 
+  se/params"),                                                                  
+          num_train_steps=2,                                                    
+          freeze_filter=pi0_config.Pi0Config(                                   
+              pi05=True,                                                        
+              paligemma_variant="gemma_2b_lora",                                
+              action_expert_variant="gemma_300m_lora"                           
+                                                                                
+          ).get_freeze_filter(),                                                
+          ema_decay=None,                                                       
+      ),，我设置use_delta_joint_actions=False/True                              
+  ,norm_stats=None（避免归一化对结果的影响，只看原始值），不管是True/False，输  
+  出的都是连续绝对动作而不是增量动作？                                          
+  ⎿  Read examples/checkout_action_seq.ipynb (4 cells)
+
+  Thought for 13s, read 2 files (ctrl+o to expand)
+
+● Let me look at the transforms implementation and the Tron2 policy to
+  understand the data flow.
+
+  Thought for 5s, read 2 files (ctrl+o to expand)
+
+● Now let me look at how the data loader applies these transforms, and also
+  check the LeRobot dataset to understand what actions the raw data contains.
+
+  Thought for 38s, read 1 file (ctrl+o to expand)
+
+● Now I have a complete picture. Let me provide a thorough analysis.
+
+  分析结果
+
+  核心问题是：base_config=DataConfig(norm_stats=None) 被 create_base_config() 
+  无条件覆盖了，而且 DeltaActions 的行为可能不如你预期。
+
+  ---
+  问题 1：norm_stats=None 被静默忽略（重要！）
+
+  看 LeRobotTronDataConfig 的继承链：
+
+  LeRobotTronDataConfig.create() (config.py:787-811) 调用
+  self.create_base_config(assets_dirs, model_config)。
+
+  DataConfigFactory.create_base_config() (config.py:423-446):
+  def create_base_config(self, assets_dirs, model_config):
+      ...
+      return dataclasses.replace(
+          self.base_config or DataConfig(),      # ← 这里是你的 base_config
+          repo_id=repo_id,
+          asset_id=asset_id,
+          norm_stats=self._load_norm_stats(...),  # ← 不管 base_config 
+  里写了什么，这里 ALWAYS OVERRIDE！
+          use_quantile_norm=...,
+      )
+
+  你设置的 base_config=DataConfig(norm_stats=None) 被 dataclasses.replace() +
+  后续的 norm_stats=self._load_norm_stats(...) 完全忽略了。只要你 AssetsConfig
+  指向的目录下有 norm stats 文件，它们就会被加载进来。
+
+  验证方法：在数据加载完成后打印 data_config.norm_stats，看看是不是 None。
+
+  ---
+  问题 2：use_delta_joint_actions 的行为
+
+  先看数据流（data_loader.py:414-448）：
+
+  transform_dataset() 的变换链：
+    repack_transforms.inputs       → 键名重映射
+    data_transforms.inputs         → [Tron2Inputs, 可能还有 DeltaActions]
+    Normalize(norm_stats)           → 归一化
+    model_transforms.inputs         → [ResizeImages, TokenizePrompt,
+  PadStatesAndActions]
+
+  use_delta_joint_actions=False（你当前配置）
+
+  LeRobotTronDataConfig.create() (config.py:794-799):
+  if self.use_delta_joint_actions:  # ← False，跳过
+      ...
+
+  没有加 DeltaActions transform。动作直接从 LeRobot 数据集原样输出。
+
+  LeRobot 数据集用 delta_timestamps 返回的 "action"
+  值是未来时间步的绝对关节位置（连续弧度值，-3 ~ 3
+  左右）。所以输出是连续绝对动作。
+
+  use_delta_joint_actions=True（如果改成 True）
+
+  DeltaActions.__call__() (transforms.py:431-446):
+  def __call__(self, data):
+      state, actions = data["state"], data["actions"]
+      mask = np.asarray(self.mask)          # (T,T,T,T,T,T,T, F, T,T,T,T,T,T,T, 
+  F)
+      dims = mask.shape[-1]                 # 16
+      actions[..., :dims] -= np.expand_dims(
+          np.where(mask, state[..., :dims], 0), axis=-2
+      )
+      return data
+
+  mask 是 make_bool_mask(7, -1, 7, -1) = (True,×7, False, True,×7, False)
+  - 7 个左臂关节 → delta ✓
+  - 左夹爪 → 绝对值 ✓
+  - 7 个右臂关节 → delta ✓
+  - 右夹爪 → 绝对值 ✓
+
+  delta = target_absolute_position - current_state
+
+  但这仍然是连续值（delta of radians = radians），只是数值较小（通常在 ±0.1
+  左右而不是 ±3）。
+
+  ---
+  问题 3：你的核心困惑
+
+  你说"输出的是连续绝对动作而不是增量动作"——可能是以下几个原因之一：
+
+  ┌──────────────┬──────────────────────────────────────────────────────────┐
+  │     原因     │                           说明                           │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ norm_stats   │ 如果 norm stats 被加载，Normalize 会对 state 和 actions  │
+  │ 意外加载了   │ 做 z-score 归一化，改变了数值范围，让 delta 看不出来     │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ delta 值依然 │ Delta actions 是 target_position - current_position，两  │
+  │ 是连续的     │ 个连续值的差仍然是连续浮点数。它不是离散值               │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ 没有实际对比 │ 肉眼看不出来，建议直接打印 actions - state 的绝对值统计  │
+  │  True/False  │                                                          │
+  └──────────────┴──────────────────────────────────────────────────────────┘
+
+  ---
+  调查建议
+
+  用这个代码在 notebook 里跑，验证 transform 链：
+
+  config = _config.get_config("pi05_tron_single_data_lora")
+
+  # 检查 norm_stats 是否真的被忽略
+  data_config = config.data.create(config.assets_dirs, config.model)
+  print("norm_stats:", data_config.norm_stats)  # 看看是不是 None
+
+  # 对比两种设置的数据变换
+  print("data_transforms inputs:", data_config.data_transforms.inputs)
+  # with use_delta_joint_actions=False: [Tron2Inputs]
+  # with use_delta_joint_actions=True:  [Tron2Inputs, DeltaActions(mask=...)]
+
+  或者更直接，检查你的数据：
+
+  # 看 batch 中的 action 和 state
+  action = batch[1]  # [1, action_horizon, 32]
+  state = batch[0].state  # [1, 32]
+
+  # 如果 DeltaActions 生效，action 的前7维 ≈ target - state
+  # 如果没生效，action 的前7维 ≈ target（等于原数据）
+  print("actions mean:", action[0, 0, :7].mean())
+  print("state mean:", state[0, :7].mean())
+  print("difference:", action[0, 0, :7].mean() - state[0, :7].mean())
+
+  ---
+  总结
+
+  设置: use_delta_joint_actions=False
+  实际效果: 原始数据集的绝对关节位置
+  ────────────────────────────────────────
+  设置: use_delta_joint_actions=True
+  实际效果: 7 左臂关节 + 7 右臂关节 → delta（但仍是连续值）；2 个夹爪 → 绝对值
+  ────────────────────────────────────────
+  设置: norm_stats=None in base_config
+  实际效果: 被 create_base_config() 静默覆盖，如果想跳过归一化，需要确保 assets
+  目录下没有 norm stats 文件，或者修改 create_base_config() 逻辑
+
+  所以你的问题的答案：use_delta_joint_actions=True 
+  后，关节维度（7+7）确实会被转换为 delta actions，但因为它们仍然是连续浮点值（
+  弧度差），光看数字你可能看不出和绝对值的区别。而 norm_stats=None 因为被
+  create_base_config 覆盖，可能根本没生效。
+
+  要不要我帮你修改 LeRobotTronDataConfig 或 create_base_config() 让
+  base_config.norm_stats 能真正生效？
+
+✻ Baked for 1m 15s
+
+※ recap: Investigating why outputs look like continuous absolute actions regardless of `use_delta_joint_actions`. The `DeltaActions` transform **does** convert 7+7 joints to deltas when True, but they're still continuous floats (radian deltas), so visually similar. Want me to verify by printing `(actions - state)` comparison? (disable recaps in /config)
+
+❯ 我现在直接改了create_base_config() 的逻辑，直接赋值为None，但是仍然           
+   use_delta_joint_actions不管设置Fasle还是True，输出结果都一样                 
+
+  Thought for 1m 45s (ctrl+o to expand)
+
+● 这个现象确实很让人困惑。让我把整个数据流完整追踪一遍，找出问题。
+
+  Step by Step 追踪
+
+  1. norm_stats=None 的问题
+
+  你改 create_base_config() 让它返回 norm_stats=None 后，会触发
+  transform_dataset() (data_loader.py:433-436) 的报错：
+
+  norm_stats = {}  # 初始值是空 dict，不是 None
+  if data_config.repo_id != "fake" and not skip_norm_stats:
+      if data_config.norm_stats is None:
+          raise ValueError("未找到归一化统计量。请先运行脚本计算...")
+
+  所以如果你真的强制返回 None，代码根本跑不到 batch = next(data_iter) 就崩了。
+
+  这说明你当前的 norm_stats 不是 None，而是从 _load_norm_stats
+  加载到了东西，或者被兜底成了 {}（空 dict — Normalize 会变成 no-op）。
+
+  2. use_delta_joint_actions 的追踪
+
+  data_config.data_transforms.inputs 的构成：
+
+  False: [Tron2Inputs]
+  True:  [Tron2Inputs, DeltaActions(make_bool_mask(7, -1, 7, -1))]
+
+  在 transform_dataset() 中，DeltaActions 在 Tron2Inputs 之后、Normalize
+  之前执行。两个配置的 transform 链确实不同，输出应该不同。
+
+  除非... 有一个隐藏问题。
+
+  3. 核心线索：LeRobotTronDataConfig 有一个语法 bug！
+
+  看第 766 行：
+
+  use_delta_joint_actions: bool = True,   # ← 末尾逗号！
+
+  在 Python 中，True, 是元组 (True,)，不是 True！
+
+  >>> x = True,   # ← 等号后面加逗号，这是元组！
+  >>> type(x)
+  <class 'tuple'>
+  >>> x
+  (True,)
+
+  但这不是问题根源（你传了 False 覆盖默认值）。问题在于——让我确认一下你的实际修
+  改流程。先看我能想到的最可能原因：
+
+  ---
+  最可能的原因
+
+  🔴 原因 1：Notebook Kernel 缓存了旧代码（最可能）
+
+  Jupyter notebook 在第一个 cell 执行 import 后，整个模块被缓存到内存中。你修改
+  config.py 后，notebook 里不会自动重新加载。
+
+  验证方法 — 在 notebook 里加一个 cell 跑：
+
+  # 检查当前加载的模块是否是修改后的版本
+  import openpi.training.config as _config
+  import inspect
+  # 看看 create_base_config 的源码
+  print(inspect.getsource(_config.DataConfigFactory.create_base_config))
+
+  如果输出还是旧的代码，说明 kernel 需要重启。
+
+  正确流程：每次改 config.py 后，需要 Restart Kernel（不是只点"Run All"）！
+
+  或者加上 %load_ext autoreload %autoreload 2 在 notebook 开头。
+
+  🔴 原因 2：你实际在对比的数据是同一份
+
+  能不能在 notebook 里加个 cell 直接验证 transform chain 是否不同？
+
+  # 两套配置对比
+  config_false = _config.get_config("pi05_tron_single_data_lora")
+
+  # 手动创建一个 use_delta=True 来对比
+  diff_config = dataclasses.replace(config_false.data,
+      use_delta_joint_actions=True)
+
+  # 对比 data_transforms
+  data_false = config_false.data.create(config_false.assets_dirs,
+  config_false.model)
+  data_true = diff_config.create(config_false.assets_dirs, config_false.model)
+
+  print("=== False ===")
+  for t in data_false.data_transforms.inputs:
+      print(f"  {type(t).__name__}: {t}")
+  print("=== True ===")
+  for t in data_true.data_transforms.inputs:
+      print(f"  {type(t).__name__}: {t}")
+
+  🔴 原因 3：数值上看不出区别（可能性小）
+
+  DeltaActions 做的是 actions -= np.where(mask, state, 0)。如果数据集里 state 和
+  action 本身就非常接近（机器人动得少），那么 action（原始绝对）和 action - 
+  state（delta）的数值差异很小，肉眼可能看不出来。
+
+  ---
+  总结
+
+  你的两个核心问题：
+
+  ┌────────────────────────────┬────────────────────────────────────────────┐
+  │           你问的           │                    答案                    │
+  ├────────────────────────────┼────────────────────────────────────────────┤
+  │ use_delta_joint_actions    │ 几乎肯定是 kernel                          │
+  │ True/False 输出为何相同    │ 缓存了旧代码，或者你的修改没有生效         │
+  ├────────────────────────────┼────────────────────────────────────────────┤
+  │                            │ norm_stats 并未真正设为 None（设为 None    │
+  │ 输出为什么是连续绝对动作   │ 代码会崩），所以 Normalize 仍在工作；或者  │
+  │                            │ DeltaActions 根本没进入 transform 链       │
+  └────────────────────────────┴────────────────────────────────────────────┘
+
+  几个需要修复的小问题：
+
+  1. use_delta_joint_actions: bool = True, → 末尾逗号让默认值变成元组
+  (True,)（虽然不影响你传参，但不规范）
+  2. base_config=DataConfig(norm_stats=None) → 被 create_base_config()
+  无条件覆盖，这个才是你的意图和实际行为不符的根本原因
+
+  要我帮你：
+  - 修复 create_base_config() 让 base_config.norm_stats 真正生效？
+  - 或者给 LeRobotTronDataConfig 加一个 skip_norm_stats 开关，直接跳过归一化？
+  - 或者先改出来一个只输出原始值的调试版本来定位问题？
+
+✻ Cooked for 1m 57s
+
+❯ 我现在直接设置跳过归一化了，然后下面分别是use_delta_joint_actions设置为True和 
+  False的前几个action值，我看不出来有何区别，我预想的是绝对值会是较大的数且连贯 
+  ，delta动作应该都是很小的值且无连贯性。  # True                               
+                                                                                
+  [[[-2.10368354e-02  1.28260404e-02  9.05428361e-03 -1.33764744e-02            
+     -1.86708570e-03 -1.51715167e-02 -3.71315144e-03  0.00000000e+00            
+     -7.46110268e-03 -1.47266984e-02 -2.64521241e-02 -2.81800032e-02            
+     -4.80298698e-03 -2.03516558e-02 -2.99468543e-03  9.99999978e-03            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00]           
+    [-2.36889254e-02  1.43638998e-02  9.93181393e-03 -1.17348433e-02            
+     -1.87087059e-03 -1.86820664e-02 -4.95351758e-03  0.00000000e+00            
+     -4.77476418e-03 -1.96568072e-02 -3.58277559e-02 -2.98727751e-02            
+     -6.61951303e-03 -2.62908228e-02 -4.00723517e-03  9.99999978e-03            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00]           
+    [-2.69815624e-02  1.62731856e-02  1.10212881e-02 -9.69660282e-03            
+     -1.87557936e-03 -2.30405014e-02 -6.49346318e-03  0.00000000e+00            
+     -1.43961050e-03 -2.57776529e-02 -4.74678315e-02 -3.19741964e-02            
+     -8.87478888e-03 -3.36644463e-02 -5.26434043e-03  9.99999978e-03            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00]           
+                                                                                
+                                                                                
+  # False                                                                       
+                                                                                
+  [[[ 2.30631959e-02  2.36626461e-01 -7.63120223e-03 -1.58427632e+00            
+      2.36032933e-01  3.05285566e-02  1.07865129e-02  0.00000000e+00            
+     -2.33610142e-02 -2.07126677e-01  8.15326571e-02 -1.55527997e+00            
+     -2.20203027e-01  5.16483709e-02  8.80536530e-03  9.99999978e-03            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00]           
+    [ 2.04111058e-02  2.38164321e-01 -6.75367238e-03 -1.58263469e+00            
+      2.36029148e-01  2.70180069e-02  9.54614673e-03  0.00000000e+00            
+     -2.06746757e-02 -2.12056786e-01  7.21570253e-02 -1.55697274e+00            
+     -2.22019553e-01  4.57092039e-02  7.79281557e-03  9.99999978e-03            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00]           
+    [ 1.71184689e-02  2.40073606e-01 -5.66419773e-03 -1.58059645e+00            
+      2.36024439e-01  2.26595718e-02  8.00620113e-03  0.00000000e+00            
+     -1.73395220e-02 -2.18177631e-01  6.05169497e-02 -1.55907416e+00            
+     -2.24274829e-01  3.83355804e-02  6.53571030e-03  9.99999978e-03            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00]           
+
+● API Error: Unable to connect to API (ECONNRESET)
+
+✻ Cooked for 3m 35s
+
+❯ 我现在直接设置跳过归一化了，然后下面分别是use_delta_joint_actions设置为True和 
+  False的前几个action值，我看不出来有何区别，我预想的是绝对值会是较大的数且连贯 
+  ，delta动作应该都是很小的值且无连贯性。  # True                               
+                                                                                
+  [[[-2.10368354e-02  1.28260404e-02  9.05428361e-03 -1.33764744e-02            
+     -1.86708570e-03 -1.51715167e-02 -3.71315144e-03  0.00000000e+00            
+     -7.46110268e-03 -1.47266984e-02 -2.64521241e-02 -2.81800032e-02            
+     -4.80298698e-03 -2.03516558e-02 -2.99468543e-03  9.99999978e-03            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00]           
+    [-2.36889254e-02  1.43638998e-02  9.93181393e-03 -1.17348433e-02            
+     -1.87087059e-03 -1.86820664e-02 -4.95351758e-03  0.00000000e+00            
+     -4.77476418e-03 -1.96568072e-02 -3.58277559e-02 -2.98727751e-02            
+     -6.61951303e-03 -2.62908228e-02 -4.00723517e-03  9.99999978e-03            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00]           
+    [-2.69815624e-02  1.62731856e-02  1.10212881e-02 -9.69660282e-03            
+     -1.87557936e-03 -2.30405014e-02 -6.49346318e-03  0.00000000e+00            
+     -1.43961050e-03 -2.57776529e-02 -4.74678315e-02 -3.19741964e-02            
+     -8.87478888e-03 -3.36644463e-02 -5.26434043e-03  9.99999978e-03            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00]           
+                                                                                
+                                                                                
+  # False                                                                       
+                                                                                
+  [[[ 2.30631959e-02  2.36626461e-01 -7.63120223e-03 -1.58427632e+00            
+      2.36032933e-01  3.05285566e-02  1.07865129e-02  0.00000000e+00            
+     -2.33610142e-02 -2.07126677e-01  8.15326571e-02 -1.55527997e+00            
+     -2.20203027e-01  5.16483709e-02  8.80536530e-03  9.99999978e-03            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00]           
+    [ 2.04111058e-02  2.38164321e-01 -6.75367238e-03 -1.58263469e+00            
+      2.36029148e-01  2.70180069e-02  9.54614673e-03  0.00000000e+00            
+     -2.06746757e-02 -2.12056786e-01  7.21570253e-02 -1.55697274e+00            
+     -2.22019553e-01  4.57092039e-02  7.79281557e-03  9.99999978e-03            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00]           
+    [ 1.71184689e-02  2.40073606e-01 -5.66419773e-03 -1.58059645e+00            
+      2.36024439e-01  2.26595718e-02  8.00620113e-03  0.00000000e+00            
+     -1.73395220e-02 -2.18177631e-01  6.05169497e-02 -1.55907416e+00            
+     -2.24274829e-01  3.83355804e-02  6.53571030e-03  9.99999978e-03            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00            
+      0.00000000e+00  0.00000000e+00  0.00000000e+00  0.00000000e+00]           
+
+  Thought for 19s (ctrl+o to expand)
+
+● 好，现在数据很清楚，它们确实不同！我帮你做个对比分析。
+
+  数值对比（以第1个时间步为例）
+
+  ┌─────────┬──────────────┬──────────────┬───────────────┐
+  │  维度   │ True (delta) │ False (绝对) │     说明      │
+  ├─────────┼──────────────┼──────────────┼───────────────┤
+  │ 关节 0  │    -0.021    │    0.023     │     接近      │
+  ├─────────┼──────────────┼──────────────┼───────────────┤
+  │ 关节 1  │    0.013     │    0.237     │   差 18 倍    │
+  ├─────────┼──────────────┼──────────────┼───────────────┤
+  │ 关节 2  │    0.0091    │   -0.0076    │     接近      │
+  ├─────────┼──────────────┼──────────────┼───────────────┤
+  │ 关节 3  │    -0.013    │    -1.58     │ 🚩差 120 倍！ │
+  ├─────────┼──────────────┼──────────────┼───────────────┤
+  │ 关节 4  │   -0.0019    │    0.236     │  🚩差 120 倍  │
+  ├─────────┼──────────────┼──────────────┼───────────────┤
+  │ 关节 5  │    -0.015    │    0.031     │    差 2 倍    │
+  ├─────────┼──────────────┼──────────────┼───────────────┤
+  │ 关节 7  │   -0.0075    │    -0.023    │     接近      │
+  ├─────────┼──────────────┼──────────────┼───────────────┤
+  │ 关节 8  │    -0.015    │    -0.207    │   差 14 倍    │
+  ├─────────┼──────────────┼──────────────┼───────────────┤
+  │ 关节 10 │    -0.028    │    -1.56     │  🚩差 55 倍   │
+  ├─────────┼──────────────┼──────────────┼───────────────┤
+  │ 关节 13 │   -0.0030    │    0.0088    │     接近      │
+  ├─────────┼──────────────┼──────────────┼───────────────┤
+  │ 夹爪 1  │     0.0      │     0.0      │   完全一致    │
+  ├─────────┼──────────────┼──────────────┼───────────────┤
+  │ 夹爪 2  │     0.01     │     0.01     │   完全一致    │
+  └─────────┴──────────────┴──────────────┴───────────────┘
+
+  这两个输出是完全不同的，use_delta_joint_actions
+  在正常工作。夹爪（维7、15）固定为 0.0 和 0.01 是因为 mask 是 False（不做
+  delta）。
+
+  为什么 delta 动作看起来也是"连贯"的？
+
+  这是你真正困惑的地方。Delta 的公式是：
+
+  delta_actions[t] = target_absolute[t] - state   (对 mask=True 的维度)
+
+  注意 state 是同一个当前时刻的状态，不是每个时间步各有不同的 state。所以：
+
+  delta_actions[0] = target_absolute[0] - state
+  delta_actions[1] = target_absolute[1] - state
+  delta_actions[2] = target_absolute[2] - state
+  ...
+
+  因为 state 对所有时间步是同一个常数，所以 delta
+  序列的变化趋势和绝对值序列完全一样——只是整体平移了一个 state 的偏移：
+
+  delta[t] - delta[t+1] = (target[t] - state) - (target[t+1] - state) =
+  target[t] - target[t+1]
+
+  delta 的"连贯性"和绝对值的"连贯性"完全等价。你不能通过"看起来连不连贯"来区分，
+  而应该看数值量级——True 的值都在 ±0.05 以内，False 有 -1.58 的大值。
+
+  那 norm_stats 呢？这些值是否被归一化了？
+
+  看 True 输出的值：关节 3 是 -0.013（delta），关节 10 是 -0.028（delta）。
+
+  如果 state 的关节 3 ≈ -1.57，那么：
+  - 绝对动作关节 3 ≈ -1.58（False 输出）
+  - delta = -1.58 - (-1.57) = -0.01 ✅ 和 True 输出对上了
+
+  这些值明显是原始值域（弧度），没有被 z-score 归一化（否则均值附近应该是 ±1
+  范围，而不是 -1.58）。你的跳过归一化生效了。
+
+  总结
+
+  ┌───────────────────┬─────────────────────────────────────────────────────┐
+  │     你的疑问      │                      实际情况                       │
+  ├───────────────────┼─────────────────────────────────────────────────────┤
+  │ True/False        │ 不一样！ 数值差 100 倍以上                          │
+  │ 输出一样？        │                                                     │
+  ├───────────────────┼─────────────────────────────────────────────────────┤
+  │ delta             │ ✅ True 输出全在 ±0.05，False 有 -1.58              │
+  │ 应该是小值？      │                                                     │
+  ├───────────────────┼─────────────────────────────────────────────────────┤
+  │ delta             │ ❌ 这个假设不对——delta = target - 同一个            │
+  │ 应该不连贯？      │ state，所以变化趋势和绝对值一样连贯                 │
+  ├───────────────────┼─────────────────────────────────────────────────────┤
+  │ norm_stats=None   │ ✅ 原始值域（弧度值）暴露出来了                     │
+  │ 生效？            │                                                     │
+  └───────────────────┴─────────────────────────────────────────────────────┘
+
+  ✅ 你的逻辑没有问题。 训练时 use_delta_joint_actions=True
+  会让模型学习预测增量（相对于当前状态的偏移），而 False
+  让模型学习预测绝对关节位置。
+
+✻ Baked for 30s
+
+❯ 这50个action应该在时间上是连贯的吧？我想的是                                  
+  use_delta_joint_actions=False 时输出的 50个值相邻之间的差值，应该是           
+   use_delta_joint_actions=True时的动作，但是我发现并不是啊，是我计算有问题？   
+
+  Thought for 3m 55s (ctrl+o to expand)
+
+● 你说得对，相邻时间步的绝对动作差值和 delta
+  动作应该存在关系。让我用实际数据算一下。
+
+  实际验证
+
+  拿关节 0 的数据来看（False=绝对值，True=delta）：
+
+            False(绝对值 a)    True(delta d)
+  t=0:        0.02306           -0.02104
+  t=1:        0.02041           -0.02369
+  t=2:        0.01712           -0.02698
+
+  你预期的关系：差分的 delta[t] ≈ a[t+1] - a[t]
+
+  a[1] - a[0] = 0.02041 - 0.02306 = -0.00265
+  对比 delta[1] = -0.02369  → ❌ 不相等
+
+  所以你的期望没对。但这里有一个正确的对应关系：
+
+  实际的计算公式
+
+  DeltaActions 的代码（transforms.py:431-446）：
+
+  actions[..., :dims] -= np.expand_dims(np.where(mask, state[..., :dims], 0),
+  axis=-2)
+
+  对于掩码为 True 的维度，这做的是：
+
+  delta[t] = 绝对动作[t] - 当前状态(state)     ← 对每个 t=0..49
+
+  注意 减的是同一个 state，不是 action[t-1]！
+
+  所以：
+
+  delta[t] = a[t] - state      ← 所有时间步 shared state
+  a[t] = delta[t] + state
+
+  同一关节，所有时间步减的是同一个当前状态值，而不是前一个动作。
+
+  用数据验证
+
+  从 False(绝对值) 和 True(delta) 反推 state：
+
+  关节 0:  state = a[0] - d[0] = 0.02306 - (-0.02104) = 0.04410
+  验证:    a[1] = d[1] + state = -0.02369 + 0.04410 = 0.02041 ✅
+           a[2] = d[2] + state = -0.02698 + 0.04410 = 0.01712 ✅
+
+  关节 3:  state = a[0] - d[0] = -1.58428 - (-0.01338) = -1.57090
+  验证:    a[1] = d[1] + state = -0.01173 + (-1.57090) = -1.58263 ✅
+
+  全部对上！
+
+  那正确的对应关系是什么？
+
+  a[t] - a[t-1] = (delta[t] + state) - (delta[t-1] + state) = delta[t] -
+  delta[t-1]
+
+  即：绝对动作的相邻差值 = delta 动作的相邻差值
+
+  a[1] - a[0] = -0.00265
+  d[1] - d[0] = -0.02369 - (-0.02104) = -0.00265 ✅ 完全相等！
+
+  结论
+
+  ┌────────────────────────┬──────┬─────────────────────────────────────────┐
+  │        你预期的        │ 实际 │                正确关系                 │
+  ├────────────────────────┼──────┼─────────────────────────────────────────┤
+  │ delta[t] = a[t] -      │ ❌   │ delta[t] = a[t] - state                 │
+  │ a[t-1]                 │      │                                         │
+  ├────────────────────────┼──────┼─────────────────────────────────────────┤
+  │ delta                  │ ❌   │ delta 是相对当前状态的目标偏移          │
+  │ 是相邻时间步的增量     │      │                                         │
+  ├────────────────────────┼──────┼─────────────────────────────────────────┤
+  │ True 输出应是 False    │ ❌   │ True 输出 = False 输出 - state（对所有  │
+  │ 的差分                 │      │ t 同一个 state）                        │
+  └────────────────────────┴──────┴─────────────────────────────────────────┘
+
+  所以 这 50 个 delta 动作都对应同一个当前状态的偏移，它们之间差值的结构和绝对值
+  一样连贯，只是整体平移了 -state。这正是 DeltaActions 在 openpi
+  中的语义——模型学到的是"从当前状态到目标位置的偏移"，然后在推理时
+  AbsoluteActions 再通过 + state 恢复到绝对目标位置。
+
+✻ Brewed for 4m 3s
+
+※ recap: You confirmed that `use_delta_joint_actions=True` correctly produces delta = target absolute minus same current state, not adjacent timestep differences. Everything is working as designed. What would you like to do next with this understanding? (disable recaps in /config)
+
+❯ state = a[0] - d[0] = 0.02306 - (-0.02104) = 0.04410 这个东西是什么           
+
+  Thought for 8s (ctrl+o to expand)
+
+● 好问题。state 指的就是数据样本中当前时刻的机器人关节角度。
+
+  打开 LeRobot 数据集来看
+
+  当你从 LeRobot 数据集取一个样本时，它返回的数据结构大概是这样：
+
+  {
+      "observation.state": [0.044, -0.0, 0.001, -1.571, 0.236, 0.045, ...],  # 
+  当前关节位置
+      "action":  [                                        # 未来 50 步的目标位置
+          [0.023, 0.237, -0.008, -1.584, 0.236, 0.031, ...],   # action[0] = 
+  下一帧目标
+          [0.020, 0.238, -0.007, -1.583, 0.236, 0.027, ...],   # action[1]
+          ...
+      ]
+  }
+
+  state 就是 observation.state——在记录这个样本时，机器人关节当前的实际角度。
+
+  换算验证
+
+  关节 0: state = a[0] - d[0] = 0.02306 - (-0.02104) = 0.04410
+
+  这个 0.04410 弧度 ≈ 2.53°，就是：
+  - 数据被记录时，机械臂关节 0 的当前实际角度
+  - 它是一个角度值（弧度），来自机器人的编码器读数
+
+  核心理解
+
+  ┌───────────┬────────────────────────┬─────────────────────────────────┐
+  │    量     │          含义          │         值域（关节 0）          │
+  ├───────────┼────────────────────────┼─────────────────────────────────┤
+  │ state     │ 当前时刻的关节位置     │ 0.044 rad                       │
+  ├───────────┼────────────────────────┼─────────────────────────────────┤
+  │ action[t] │ 第 t 帧的目标绝对位置  │ 0.023 → 0.020 → 0.017... rad    │
+  ├───────────┼────────────────────────┼─────────────────────────────────┤
+  │ delta[t]  │ 从当前位置到目标的偏移 │ -0.021 → -0.024 → -0.027... rad │
+  └───────────┴────────────────────────┴─────────────────────────────────┘
+
+  关系很简单：delta[t] = action[t] - state（对 mask=True 的维度）
+
+  所以：
+  - 如果你用 True，模型学的是**"我从当前位置移多少"**
+  - 如果你用 False，模型学的是**"目标位置在哪里"**
+
+  两者训练的效果理论等价——因为推理时 AbsoluteActions 又加回来 state。选择 delta
+  通常是为了让模型学一个更稳定的表示（偏移量比绝对值更容易泛化）。
+
+✻ Baked for 14s
