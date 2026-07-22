@@ -39,3 +39,14 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.9  uv run scripts/train.py pi05_tron_single_dat
 -----------------------------------
 
 
+# 并行智算云中的运行命令
+
+export HF_LEROBOT_HOME="/root/shared-nvme/data/"
+
+uv run scripts/compute_norm_stats.py --config-name=<config_name>
+
+export WANDB_MODE=disabled
+
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_tron_all_data_lora --exp-name=tron2lora --overwrite
+
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_tron_all_data_lora --exp-name=tron2lora --overwrite --save_interval=10000
