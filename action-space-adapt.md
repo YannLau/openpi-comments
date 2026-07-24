@@ -679,3 +679,136 @@ flowchart TD
 | **最难的在哪？**             | **pi0 标准空间没有文档**——它是通过 `_joint_flip_mask` 等硬编码间接定义的，需要对照 ALOHA 的物理意义去反推 |
 
 实际上，**大多数平台不需要 `adapt_to_pi`**。DROID 不需要，Tron2 不需要，LIBERO 不需要。ALOHA 是唯一需要的——因为 ALOHA 的夹爪传感器是电位计（输出线性位移），和 pi0 标准数据中的编码器（输出角度）**量纲不同**，必须转换。
+
+
+#  请你检查 @src/openpi/training/config.py 中的pi05_tron_single_data_lora配置中的Tron2数据流中是否有对数据集中state和action进行截取拼接的操作？
+
+## 分析结果
+
+让我追踪 `pi05_tron_single_data_lora` 的完整训练数据流，逐一检查每个环节对 state 和 action 的处理。
+
+---
+
+### 训练数据变换链（按执行顺序）
+
+来自 `transform_dataset()`（`data_loader.py:440-448`）：
+```
+repack_transforms.inputs → data_transforms.inputs → Normalize → model_transforms.inputs
+```
+
+---
+
+### ① `repack_transforms` — 纯键名重映射，无维度操作
+
+配置中的 `RepackTransform` 只做键名映射：
+```python
+"image": {
+    "cam_high": "observation.images.cam_high",    # 将数据集键 → 统一键
+    "cam_left_wrist": "observation.images.cam_left_wrist",
+    "cam_right_wrist": "observation.images.cam_right_wrist"
+},
+"state": "observation.state",      # state ← observation.state
+"actions": "action",                # actions ← action
+```
+**State 和 action 的维度完全不变**。
+
+---
+
+### ② `data_transforms.inputs` — 有维度相关的计算，但**没有截取/拼接**
+
+#### a) `Tron2Inputs(adapt_to_pi=False)`
+
+`tron2_policy.py:83-178`：
+```python
+data = _decode_tron2(data, adapt_to_pi=False)  # → adapt_to_pi=False: state恒等变换
+# ...
+inputs = {
+    "image": images,           # 仅图像做了 cam_high → base_0_rgb 重命名
+    "image_mask": image_masks,
+    "state": data["state"],    # ⚠️ 直接透传，无截取无拼接
+}
+if "actions" in data:
+    actions = np.asarray(data["actions"])
+    actions = _encode_actions_inv(actions, adapt_to_pi=False)  # → adapt_to_pi=False: 恒等变换
+    inputs["actions"] = actions  # ⚠️ 直接透传，无截取无拼接
+```
+
+**结论：`Tron2Inputs` 对 state 和 actions 的维度不做任何修改。**
+
+#### b) `DeltaActions(mask=make_bool_mask(7, -1, 7, -1))` 
+
+`transforms.py:431-446`：
+```python
+mask = make_bool_mask(7, -1, 7, -1)
+# = (True, True, True, True, True, True, True,    # 7个关节 → delta
+#    False,                                         # 1个夹爪 → 绝对值
+#    True, True, True, True, True, True, True,     # 7个关节 → delta
+#    False)                                         # 1个夹爪 → 绝对值
+# = 共16个元素
+
+actions[..., :16] -= np.expand_dims(np.where(mask, state[..., :16], 0), axis=-2)
+```
+- `state[..., :16]` 取前16维，这刚好是 state 的全部维度（无截断）
+- `actions[..., :16]` 取前16维，刚好是 actions 的全部维度（无截断）
+- 计算完后 **actions 的维度没有改变**
+
+---
+
+### ③ `Normalize` — 逐元素归一化，**无维度操作**
+
+```python
+# use_quantile_norm = True（因为 pi05=True）
+# 对 state 和 actions 的每个维度做 (x - q01) / (q99 - q01) * 2.0 - 1.0
+```
+维度不变。
+
+---
+
+### ④ `model_transforms.inputs` — **唯一影响维度的地方**
+
+`ModelTransformFactory(default_prompt=...)` 创建：
+```python
+Group(inputs=[
+    InjectDefaultPrompt(...),         # 注入prompt
+    ResizeImages(224, 224),           # 只处理图像
+    TokenizePrompt(..., discrete_state_input=True),  # 分词器，将state传给tokenizer编码为离散token
+    PadStatesAndActions(32),          # ⚠️ 这里填充维度
+])
+```
+
+**`PadStatesAndActions(32)`** — `transforms.py:796-801`：
+```python
+def __call__(self, data):
+    data["state"] = pad_to_dim(data["state"], 32, axis=-1)     # [16] → [32]（补0填充）
+    if "actions" in data:
+        data["actions"] = pad_to_dim(data["actions"], 32, axis=-1)  # [horizon,16] → [horizon,32]（补0填充）
+    return data
+```
+
+这是 **零填充（zero padding）**，不是截取或拼接。
+
+---
+
+### 补充：`Tron2Outputs` 的动作截取
+
+`tron2_policy.py:218`：
+```python
+actions = np.asarray(data["actions"][:, :16])  # 从32维中取出前16维
+```
+
+但这是 **`outputs` 变换**（推理阶段用的，将模型32维输出还原为机器人的16维动作），不参与训练流水线。
+
+---
+
+### 完整总结表
+
+| 变换步骤                   | 对 state                     | 对 actions                               | 备注                       |
+| -------------------------- | ---------------------------- | ---------------------------------------- | -------------------------- |
+| `RepackTransform`          | 无操作                       | 无操作                                   | 仅键名重映射               |
+| `Tron2Inputs`              | 透传 [16]                    | 透传 [horizon, 16]                       | `adapt_to_pi=False` 恒等   |
+| `DeltaActions`             | 读 `state[...,:16]` 用于计算 | 写 `actions[...,:16]` 做减法             | 16维刚好是全部维度，无截断 |
+| `Normalize`                | 逐元素                       | 逐元素                                   | 维度不变                   |
+| `PadStatesAndActions(32)`  | **[16] → [32] 零填充**       | **[horizon, 16] → [horizon, 32] 零填充** | 唯一改变维度的步骤         |
+| `Tron2Outputs`（推理only） | 不处理                       | `[:, :16]` **截取前16维**                | 训练时不使用               |
+
+**结论：`pi05_tron_single_data_lora` 的训练数据流中，没有对 state 和 action 进行截取（truncation）或拼接（concatenation）操作。唯一的维度调整是 `PadStatesAndActions(32)` 做的末尾零填充（padding），目的是将 Tron2 的 16 维动作空间对齐到模型的默认 32 维动作空间。**
