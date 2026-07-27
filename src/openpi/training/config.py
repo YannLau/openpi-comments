@@ -1655,6 +1655,43 @@ _CONFIGS = [
         ).get_freeze_filter(),
         ema_decay=None,
     ),
+    # Tron2 推理配置文件-单条数据集运行 fake 推理
+    TrainConfig(
+        name="pi05_tron_fake_infer",
+        model=pi0_config.Pi0Config(
+            pi05=True
+        ),
+        data=LeRobotTronDataConfig(
+            assets = AssetsConfig( # 配置数据集统计量
+                assets_dir="/home/punk/yann_repo/openpi/assets/pi05_tron_single_data/",
+                asset_id="lerobot_2026-07-20_09-31-04",
+            ) ,
+            repo_id="lerobot_2026-07-20_09-31-04",  # Lerobot内部环境变量：export HF_LEROBOT_HOME=xxxx  数据集存放的目录
+            default_prompt="Put the banana on the plate.", # 任务的提示词,训练时会被数据集中的提示词覆盖，推理时会使用推理服务器的Policy中的，不走这里的
+            use_delta_joint_actions=True,
+            adapt_to_pi=False,
+            action_sequence_keys=("action",),
+            base_config=DataConfig(prompt_from_task=True), # 从数据集中获取prompt
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "image":{
+                                "cam_high":"observation.images.cam_high",
+                                "cam_left_wrist":"observation.images.cam_left_wrist",
+                                "cam_right_wrist":"observation.images.cam_right_wrist"
+                            },
+                            "state":"observation.state",
+                            "actions":"action",
+                        }
+                    )
+                ]
+            )
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/home/punk/yann_repo/para_check_pi0.5/yann_paras/checkpoint/openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=2,
+        ema_decay=None,
+    ),
 ]
 
 """  使用 SimpleDataConfig 的变体（没有 repo_id），意味着不会加载训练数据。  pi0_droid配置使用了SimpleDataConfig，不加载训练数据，那么这个配置还有什么用呢？     

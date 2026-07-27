@@ -63,6 +63,7 @@ class EnvMode(enum.Enum):
     ALOHA_SIM = "aloha_sim"  # ALOHA 仿真环境（MuJoCo 模拟器）
     DROID = "droid"  # DROID 数据集中的机器人平台
     LIBERO = "libero"  # LIBERO 仿真基准测试套件
+    TRON2_REAL = "tron2"
     
 
 
